@@ -1,3 +1,5 @@
+//! Always deletes, then inserts.
+
 const std = @import("std");
 const testing = std.testing;
 const unicode = std.unicode;
@@ -14,11 +16,11 @@ const Edit = struct {
     }
 
     pub fn newInsert(start: u32, end: u32) @This() {
-        return Edit{ .type = .Delete, .range = .{ start, end } };
+        return Edit{ .type = .Insert, .range = .{ start, end } };
     }
 
     pub fn newEqual(start: u32, end: u32) @This() {
-        return Edit{ .type = .Delete, .range = .{ start, end } };
+        return Edit{ .type = .Equal, .range = .{ start, end } };
     }
 };
 
@@ -43,13 +45,82 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!v
         return;
     }
 
-    const aFirstChar = aView.iterator().nextCodepointSlice() orelse std.debug.panic("boom", .{});
-    const bFirstChar = bView.iterator().nextCodepointSlice() orelse std.debug.panic("boom", .{});
+    try bisect(a, b, list);
+}
 
-    var deleteA: Edit = Edit{ .type = .Delete, .range = .{ 0, @intCast(u32, aFirstChar.len) } };
-    var insertB: Edit = Edit{ .type = .Insert, .range = .{ 0, @intCast(u32, bFirstChar.len) } };
-    try list.append(deleteA);
-    try list.append(insertB);
+fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
+    const ally = std.heap.page_allocator;
+    // Maximum diff length
+    const max_d = (a.len + b.len + 1) / 2;
+    const v_offset = max_d;
+    const v_len = 2 * max_d;
+
+    var v1 = try std.ArrayList(isize).initCapacity(ally, v_len);
+    var v2 = try std.ArrayList(isize).initCapacity(ally, v_len);
+    defer v1.deinit();
+    defer v2.deinit();
+
+    {
+        var i: usize = 0;
+        while (i < v_len) : (i += 1) {
+            v1.appendAssumeCapacity(-1);
+            v2.appendAssumeCapacity(-1);
+        }
+    }
+
+    const delta: isize = @intCast(isize, a.len) - @intCast(isize, b.len);
+    // If the total number of characters is odd, then the front path will
+    // collide with the reverse path.
+    const front = @mod(delta, @as(isize, 2)) != 0;
+    // Offsets for start and end of k loop.
+    // Prevents mapping of space beyond the grid.
+    var k1start: isize = 0;
+    var k1end: isize = 0;
+    // var k2start = 0;
+    // var k2end = 0;
+
+    var d: isize = 0;
+
+    while (d < max_d) : (d += 1) {
+        // Walk the font path one step
+        var k1 = -d + k1start;
+        while (k1 <= d - k1end) {
+            const k1_offset: usize = @intCast(usize, (@intCast(isize, v_offset) + k1));
+            var x1 = if (k1 == -d or (k1 != d and v1.items[k1_offset - 1] < v1.items[k1_offset + 1])) v1.items[k1_offset + 1] else v1.items[k1_offset - 1] + 1;
+            var y1 = (x1 - k1);
+            // if let (Some(s1), Some(s2)) = (text1.get(x1..), text2.get(y1..)) {
+            // let advance = common_prefix_bytes(s1, s2);
+            // x1 += advance;
+            // y1 += advance;
+            // }
+
+            v1.items[k1_offset] = x1;
+
+            if (x1 > a.len) {
+                // Ran off the right of the graph.
+                k1end += 2;
+            } else if (y1 > b.len) {
+                // Ran off the bottom of the graph.
+                k1start += 2;
+            } else if (front) {
+                const k2_offset: usize = v_offset + @intCast(usize, delta) - @intCast(usize, k1);
+                if (k2_offset >= 0 and k2_offset < v_len and v2.items[k2_offset] != -1) {
+                    // Mirror x2 onto top-left coordinate system.
+                    const x2 = a.len - @intCast(usize, v2.items[k2_offset]);
+                    if (x1 >= x2) {
+                        // Overlap detected.
+                        // return bisect_split(text1, text2, x1, y1);
+                        unreachable;
+                    }
+                }
+            }
+            k1 += 2;
+        }
+    }
+
+    // If we haven't returned earlier, the number of diffs equals number of
+    // characters, no commonality at all.
+    try list.appendSlice(&.{ Edit.newDelete(0, @intCast(u32, a.len)), Edit.newInsert(0, @intCast(u32, b.len)) });
 }
 
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
@@ -90,7 +161,7 @@ test "diff emojis" {
 
     const expected: []const Edit = &.{ Edit{ .type = .Delete, .range = .{ 0, 3 } }, Edit{ .type = .Insert, .range = .{ 0, 3 } } };
 
-    try testing.expectEqualSlices(Edit, diffBuf.items, expected);
+    try testing.expectEqualSlices(Edit, expected, diffBuf.items);
 }
 
 // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
@@ -171,13 +242,14 @@ test "compileDiffSpec works" {
 }
 
 test "basic diff tests" {
-    try expectDiffRoundtrip("$+woofwoof$-meow");
+    try expectDiffRoundtrip("$-meow$+woofwoof");
 }
 
 fn expectDiffRoundtrip(comptime spec: []const u8) anyerror!void {
     const ally = testing.allocator;
     const ds = compileDiffSpec(spec);
     var diffed = std.ArrayList(Edit).init(ally);
+    defer diffed.deinit();
     try diff(ds.a, ds.b, &diffed);
     try testing.expectEqualSlices(Edit, ds.diff, diffed.items);
 }

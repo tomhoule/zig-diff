@@ -1,5 +1,6 @@
 /result
 /.direnv
 /zig-cache
+/src/zig-cache
 /zig-out
 
