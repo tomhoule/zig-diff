@@ -48,6 +48,7 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!v
     try bisect(a, b, list);
 }
 
+// Find the middle snake.
 fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     const ally = std.heap.page_allocator;
     // Maximum diff length
@@ -103,10 +104,10 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
                 // Ran off the bottom of the graph.
                 k1start += 2;
             } else if (front) {
-                const k2_offset: usize = v_offset + @intCast(usize, delta) - @intCast(usize, k1);
-                if (k2_offset >= 0 and k2_offset < v_len and v2.items[k2_offset] != -1) {
+                const k2_offset: isize = @intCast(isize, v_offset) + @intCast(isize, delta) - @intCast(isize, k1);
+                if (k2_offset >= 0 and k2_offset < v_len and v2.items[@intCast(usize, k2_offset)] != -1) {
                     // Mirror x2 onto top-left coordinate system.
-                    const x2 = a.len - @intCast(usize, v2.items[k2_offset]);
+                    const x2 = a.len - @intCast(usize, v2.items[@intCast(usize, k2_offset)]);
                     if (x1 >= x2) {
                         // Overlap detected.
                         // return bisect_split(text1, text2, x1, y1);
@@ -166,66 +167,8 @@ test "diff emojis" {
 
 // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
 test "diff emojis with longer string" {
-    _ = testing.allocator;
-
-    _ = "[乀丁abcd一]".*;
-    _ = "[一abcd丁]".*;
-
-    // let d = diff(a, b);
-    // assert_eq!(
-    //     d,
-    //     vec![
-    //         Chunk::Equal("["),
-    //         Chunk::Delete("乀丁"),
-    //         Chunk::Insert("一"),
-    //         Chunk::Equal("abcd"),
-    //         Chunk::Delete("一"),
-    //         Chunk::Insert("丁"),
-    //         Chunk::Equal("]"),
-    //     ]
-    //     // Unicode snowman and unicode comet have the same first two bytes. A
-    //     // byte-based diff would produce a 2-byte Equal followed by 1-byte Delete
-    //     // and Insert.
-    //     const snowman = "\u{2603}";
-    //     const comet = "\u{2604}";
-    //     te
-    //     assert_eq!(snowman.as_bytes()[..2], comet.as_bytes()[..2]);
-
-    //     let d = diff(snowman, comet);
-    //     assert_eq!(d, vec![Chunk::Delete(snowman), Chunk::Insert(comet)]);
+    try expectDiffRoundtrip("$=[$-乀丁$+一$=abcd$-一$+丁$=]");
 }
-
-// fn testUtf8Diff(a: []const u8, b: []const u8, expected: []const u8) anyerror!void {
-//     const ally = std.testing.allocator;
-//     var buf = std.ArrayList(Edit).init(ally);
-//     try diff(a, b, buf);
-
-//     // var expectedBuf = std.ArrayList(Edit).init(ally);
-//     const expectedUtf8 = try unicode.Utf8View.init(expected).iterator();
-//     var idx = 0;
-
-//     while (idx < expected.len) {
-//         const char = expectedUtf8.nextCodepointSlice();
-//         switch (char) {
-//             "$" => {
-//                 switch (expectedUtf8.nextCodepointSlice()) {
-//                     "+" => {
-//                         unreachable;
-//                     },
-//                     "-" => {
-//                         unreachable;
-//                     },
-//                     "=" => {
-//                         unreachable;
-//                     },
-//                 }
-//             },
-//             else => {
-//                 idx += char.len;
-//             },
-//         }
-//     }
-// }
 
 test "compileDiffSpec works" {
     const ds1 = compileDiffSpec("$=abcd");
@@ -246,29 +189,49 @@ test "basic diff tests" {
 }
 
 fn expectDiffRoundtrip(comptime spec: []const u8) anyerror!void {
+    const ds = comptime compileDiffSpec(spec);
     const ally = testing.allocator;
-    const ds = compileDiffSpec(spec);
     var diffed = std.ArrayList(Edit).init(ally);
     defer diffed.deinit();
     try diff(ds.a, ds.b, &diffed);
-    try testing.expectEqualSlices(Edit, ds.diff, diffed.items);
+    try testing.expectEqualSlices(Edit, ds.diff, diffed.items) catch |err| blk: {
+        var dsDiff = std.ArrayList(u8).init(ally);
+        defer dsDiff.deinit();
+        try debugFmtDiff(ds.a, ds.b, ds.diff, dsDiff.writer());
+        var diffedDiff = std.ArrayList(u8).init(ally);
+        try debugFmtDiff(ds.a, ds.b, diffed.items, diffedDiff.writer());
+        defer diffedDiff.deinit();
+        std.log.err(
+            \\
+            \\Input a:
+            \\
+            \\{s}
+            \\
+            \\Input b:
+            \\
+            \\{s}
+            \\
+            \\Expected diff:
+            \\
+            \\{s}
+            \\
+            \\Found diff:
+            \\
+            \\{s}
+        , .{ ds.a, ds.b, dsDiff.items, diffedDiff.items });
+        break :blk err;
+    };
 }
 
-// test "basic debugFmt" {
-//     // {
-//     //     const thing = comptime compileDiffSpec("$=meow");
-//     //     const s = thing.debugFmt();
-
-//     //     std.debug.panic("{s}", .{s});
-//     // }
-
-//     {
-//         const thing = comptime compileDiffSpec("$+woofwoof$-meow");
-//         const s = thing.debugFmt();
-
-//         std.debug.panic("\n{s}", .{s});
-//     }
-// }
+fn debugFmtDiff(a: []const u8, b: []const u8, edits: []const Edit, out: anytype) !void {
+    for (edits) |edit| {
+        switch (edit.type) {
+            .Equal => try out.writeAll(a[edit.range[0]..edit.range[1]]),
+            .Delete => try out.print("\x1b[41m{s}\x1b[0m", .{a[edit.range[0]..edit.range[1]]}),
+            .Insert => try out.print("\x1b[42m{s}\x1b[0m", .{b[edit.range[0]..edit.range[1]]}),
+        }
+    }
+}
 
 const DiffSpec = struct {
     diff: []const Edit,
@@ -277,7 +240,7 @@ const DiffSpec = struct {
 
     fn debugFmt(comptime this: @This()) []const u8 {
         comptime {
-            var out: []const u8 = "Input a:\n\n" ++ this.a ++ "\n\nInput b:\n\n" ++ this.b ++ "\n\nDiff:\n\n";
+            var out: []const u8 = "";
 
             for (this.diff) |edit| {
                 const chunk = switch (edit.type) {
