@@ -124,59 +124,105 @@ test "diff emojis with longer string" {
     //     assert_eq!(d, vec![Chunk::Delete(snowman), Chunk::Insert(comet)]);
 }
 
-fn testUtf8Diff(a: []const u8, b: []const u8, expected: []const u8) anyerror!void {
-    const ally = std.testing.allocator;
-    var buf = std.ArrayList(Edit).init(ally);
-    try diff(a, b, buf);
+// fn testUtf8Diff(a: []const u8, b: []const u8, expected: []const u8) anyerror!void {
+//     const ally = std.testing.allocator;
+//     var buf = std.ArrayList(Edit).init(ally);
+//     try diff(a, b, buf);
 
-    // var expectedBuf = std.ArrayList(Edit).init(ally);
-    const expectedUtf8 = try unicode.Utf8View.init(expected).iterator();
-    var idx = 0;
+//     // var expectedBuf = std.ArrayList(Edit).init(ally);
+//     const expectedUtf8 = try unicode.Utf8View.init(expected).iterator();
+//     var idx = 0;
 
-    while (idx < expected.len) {
-        const char = expectedUtf8.nextCodepointSlice();
-        switch (char) {
-            "$" => {
-                switch (expectedUtf8.nextCodepointSlice()) {
-                    "+" => {
-                        unreachable;
-                    },
-                    "-" => {
-                        unreachable;
-                    },
-                    "=" => {
-                        unreachable;
-                    },
-                }
-            },
-            else => {
-                idx += char.len;
-            },
-        }
-    }
-}
+//     while (idx < expected.len) {
+//         const char = expectedUtf8.nextCodepointSlice();
+//         switch (char) {
+//             "$" => {
+//                 switch (expectedUtf8.nextCodepointSlice()) {
+//                     "+" => {
+//                         unreachable;
+//                     },
+//                     "-" => {
+//                         unreachable;
+//                     },
+//                     "=" => {
+//                         unreachable;
+//                     },
+//                 }
+//             },
+//             else => {
+//                 idx += char.len;
+//             },
+//         }
+//     }
+// }
 
 test "compileDiffSpec works" {
     const ds1 = compileDiffSpec("$=abcd");
     const ds1_exp: []const Edit = &.{Edit{ .type = .Equal, .range = .{ 0, 4 } }};
-    try testing.expectEqualSlices(Edit, ds1_exp, ds1);
+    try testing.expectEqualSlices(Edit, ds1_exp, ds1.diff);
 
     const ds2 = compileDiffSpec("$-abcd$+efgh");
     const ds2_exp: []const Edit = &.{ Edit{ .type = .Delete, .range = .{ 0, 4 } }, Edit{ .type = .Insert, .range = .{ 0, 4 } } };
-    try testing.expectEqualSlices(Edit, ds2_exp, ds2);
+    try testing.expectEqualSlices(Edit, ds2_exp, ds2.diff);
 
     const ds3 = compileDiffSpec("$-abcd$+efgh$= $-aiue$+ζιγ");
     const ds3_exp: []const Edit = &.{ Edit{ .type = .Delete, .range = .{ 0, 4 } }, Edit{ .type = .Insert, .range = .{ 0, 4 } }, Edit{ .type = .Equal, .range = .{ 4, 5 } }, Edit{ .type = .Delete, .range = .{ 5, 9 } }, Edit{ .type = .Insert, .range = .{ 5, 11 } } };
-    try testing.expectEqualSlices(Edit, ds3_exp, ds3);
+    try testing.expectEqualSlices(Edit, ds3_exp, ds3.diff);
 }
+
+test "basic diff tests" {
+    try expectDiffRoundtrip("$+woofwoof$-meow");
+}
+
+fn expectDiffRoundtrip(comptime spec: []const u8) anyerror!void {
+    const ally = testing.allocator;
+    const ds = compileDiffSpec(spec);
+    var diffed = std.ArrayList(Edit).init(ally);
+    try diff(ds.a, ds.b, &diffed);
+    try testing.expectEqualSlices(Edit, ds.diff, diffed.items);
+}
+
+// test "basic debugFmt" {
+//     // {
+//     //     const thing = comptime compileDiffSpec("$=meow");
+//     //     const s = thing.debugFmt();
+
+//     //     std.debug.panic("{s}", .{s});
+//     // }
+
+//     {
+//         const thing = comptime compileDiffSpec("$+woofwoof$-meow");
+//         const s = thing.debugFmt();
+
+//         std.debug.panic("\n{s}", .{s});
+//     }
+// }
 
 const DiffSpec = struct {
     diff: []const Edit,
-    a: []u8,
-    b: []u8,
+    a: []const u8,
+    b: []const u8,
+
+    fn debugFmt(comptime this: @This()) []const u8 {
+        comptime {
+            var out: []const u8 = "Input a:\n\n" ++ this.a ++ "\n\nInput b:\n\n" ++ this.b ++ "\n\nDiff:\n\n";
+
+            for (this.diff) |edit| {
+                const chunk = switch (edit.type) {
+                    .Equal => this.a[edit.range[0]..edit.range[1]],
+                    .Delete => std.fmt.comptimePrint("\x1b[41m{s}\x1b[0m", .{this.a[edit.range[0]..edit.range[1]]}),
+                    .Insert => std.fmt.comptimePrint("\x1b[42m{s}\x1b[0m", .{this.b[edit.range[0]..edit.range[1]]}),
+                };
+
+                out = out ++ chunk;
+            }
+
+            return out;
+        }
+    }
 };
 
-fn compileDiffSpec(comptime expected: []const u8) []const Edit {
+fn compileDiffSpec(comptime expected: []const u8) DiffSpec {
     comptime {
         const utf8ExpectedView = unicode.Utf8View.init(expected) catch {
             @compileError("not utf8: " ++ expected);
@@ -230,7 +276,8 @@ fn compileDiffSpec(comptime expected: []const u8) []const Edit {
         const lastEdit = makeEdit(editType, aRangeStart, a.len, bRangeStart, b.len);
         edits = edits ++ [_]Edit{lastEdit};
 
-        return edits;
+        const spec = DiffSpec{ .diff = edits, .a = a, .b = b };
+        return spec;
     }
 }
 
