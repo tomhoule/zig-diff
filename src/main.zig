@@ -1,4 +1,21 @@
-//! Always deletes, then inserts.
+//!
+//! ## Naming of arguments and variables
+//!
+//! - `a` and `b` correspond to the A and B sequences in the Myers paper. Their
+//!   respective lengths are M and N.
+//! - `k` is a diagonal in the grid. k ranges from -M to N.
+//! - `d` corresponds to D in the paper: the length of the shortest edit script
+//!   (diff) between A and B. The length of an edit script is the sum of the
+//!   length of the ranges it contains. If L is the longest common subsequence
+//!   of A and B, then D = 2(N - L).
+//!   + When L = 0, then D = 2N, which makes intuitive sense: Delete(A),
+//!     Insert(B).
+//!   + When L = len(A), then D = 2(N - len(A)). Intuitively, it corresponds to
+//!     an Equal edit of length len(A), and between 0 and 2 Insert edits.
+//!   Equivalently, D is the length of a D-path.
+//!
+//! ## Diffs
+//! - Always deletes, then inserts.
 
 const std = @import("std");
 const testing = std.testing;
@@ -50,13 +67,35 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!v
 
 // Find the middle snake.
 fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
+    // TODO: remove.
     const ally = std.heap.page_allocator;
-    // Maximum diff length
+
+    // Since D = 2(N - L), if the strings have nothing in common (L=0), D = N =
+    // len(A) + len(B). We divide by two because we are using a divide and
+    // conquer approach, where we find the middle snake starting simultaneously
+    // in opposite directions in the graph.
     const max_d = (a.len + b.len + 1) / 2;
+
+    // V arrays.
+    //
+    // They record the endpoint of all D-paths for a given length. Since every
+    // iteration of D uses only odd, or only even indices (lemma 1), they are used
+    // to store the results for D paths and (D+1) paths at the same time. See
+    // page 6 of the paper for more details.
+    //
+    // Note that they only store the x component of the furthest reaching
+    // D path for each diagonal: the y component can be inferred from the
+    // index, since the indices correspond to diagonals.
+    //
+    // We have two of these: one for the forward path and one for the reverse
+    // path.
     const v_offset = max_d;
+    // The indices of V should be thought of as ranging [-max_d, max_d].
     const v_len = 2 * max_d;
 
+    // The V array for **forward** paths.
     var v1 = try std.ArrayList(isize).initCapacity(ally, v_len);
+    // The V array for **reverse** paths.
     var v2 = try std.ArrayList(isize).initCapacity(ally, v_len);
     defer v1.deinit();
     defer v2.deinit();
@@ -69,26 +108,58 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
         }
     }
 
+    // We start at (0, 0) and (N, M). At these points (equivalently, for these
+    // diagonals), we know there are 0-paths, so we can already fill that in.
+    v1[v_offset + 1] = 0;
+    v2[v_offset + 1] = 0;
+
+    // The center (0) for the k diagonals in the **reverse** direction. This is
+    // used to translate diagonals between the forward and reverse paths.
+    // Finding the middle snake means finding a diagonal, so this is important.
     const delta: isize = @intCast(isize, a.len) - @intCast(isize, b.len);
-    // If the total number of characters is odd, then the front path will
+
+    // If the total number of characters is odd, then the forward path will
     // collide with the reverse path.
     const front = @mod(delta, @as(isize, 2)) != 0;
+
     // Offsets for start and end of k loop.
-    // Prevents mapping of space beyond the grid.
+    // Prevents mapping of space beyond the grid. k variables are diagonals. k1
+    // is the forward path, k2 is the reverse path.
     var k1start: isize = 0;
     var k1end: isize = 0;
-    // var k2start = 0;
-    // var k2end = 0;
+    var k2start: isize = 0;
+    var k2end: isize = 0;
 
+    // The size of the D-paths we consider.
     var d: isize = 0;
 
+    // Walk D-paths starting from (0, 0) (forward path) and (N, M)
+    // (reverse path) until they meet and form a (potentially empty) middle
+    // snake.
     while (d < max_d) : (d += 1) {
-        // Walk the font path one step
+
+        // Walk the forward path one step.
+        // Every second k (diagonal) is considered, because that is where a D
+        // path of length d must end (lemma 1 in the paper).
         var k1 = -d + k1start;
-        while (k1 <= d - k1end) {
-            const k1_offset: usize = @intCast(usize, (@intCast(isize, v_offset) + k1));
-            var x1 = if (k1 == -d or (k1 != d and v1.items[k1_offset - 1] < v1.items[k1_offset + 1])) v1.items[k1_offset + 1] else v1.items[k1_offset - 1] + 1;
+        while (k1 <= d - k1end) : (k1 += 2) {
+            const k1_offset = @intCast(usize, (@intCast(isize, v_offset) + k1));
+            // ????
+            var x1 = if (k1 == -d or (k1 != d and
+                v1.items[k1_offset - 1] < v1.items[k1_offset + 1]))
+                v1.items[k1_offset + 1]
+            else
+                v1.items[k1_offset - 1] + 1;
+
+            // Intuition: the diagonal that goes through (0, 0) is k = 0.
+            // There, x = y (makes sense visually). The ones above and below it
+            // have k = 1 or k = -1, respectively, and there y is one-removed
+            // from x. As we move away from the (0, 0) diagonal, the distance
+            // grows.
             var y1 = (x1 - k1);
+
+            // // We have the end of the D-path: (x1, y1). Now let's extend it
+            // // with its snake.
             // if let (Some(s1), Some(s2)) = (text1.get(x1..), text2.get(y1..)) {
             // let advance = common_prefix_bytes(s1, s2);
             // x1 += advance;
@@ -98,10 +169,12 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
             v1.items[k1_offset] = x1;
 
             if (x1 > a.len) {
-                // Ran off the right of the graph.
+                // Ran off the right of the graph. We don't need to consider
+                // this diagonal anymore in subsequent iterations.
                 k1end += 2;
             } else if (y1 > b.len) {
-                // Ran off the bottom of the graph.
+                // Ran off the bottom of the graph. We don't need to consider
+                // this diagonal anymore in subsequent iterations.
                 k1start += 2;
             } else if (front) {
                 const k2_offset: isize = @intCast(isize, v_offset) + @intCast(isize, delta) - @intCast(isize, k1);
@@ -115,17 +188,32 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
                     }
                 }
             }
-            k1 += 2;
         }
     }
 
-    // If we haven't returned earlier, the number of diffs equals number of
+    // If we haven't returned earlier, the number of edits equals number of
     // characters, no commonality at all.
     try list.appendSlice(&.{ Edit.newDelete(0, @intCast(u32, a.len)), Edit.newInsert(0, @intCast(u32, b.len)) });
 }
 
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
     return std.unicode.Utf8Iterator{ .bytes = it.bytes, .i = it.i };
+}
+
+/// Returns the common suffix length in _bytes_. It also advances the iterators.
+fn findCommonSuffixBytes(a: []const u8, b: []const u8) u32 {
+    const max = std.math.min(a.len, b.len);
+    var i = 0;
+    while (i <= max and a[a.len - (i + 1)] == b[b.len - (i + 1)]) : (i += 1) {}
+    return i;
+}
+
+/// Returns the common suffix length in _bytes_. It also advances the iterators.
+fn findCommonPrefixBytes(a: []const u8, b: []const u8) u32 {
+    const max = std.math.min(a.len, b.len);
+    var i = 0;
+    while (i <= max and a[i] == b[i]) : (i += 1) {}
+    return i;
 }
 
 /// Returns the common prefix length in _bytes_. It also advances the iterators.
