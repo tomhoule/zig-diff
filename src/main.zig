@@ -47,6 +47,8 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!v
     var aIter = aView.iterator();
     var bIter = bView.iterator();
     const commonPrefix = findCommonPrefix(&aIter, &bIter);
+    // TODO: make it utf-8 aware.
+    const commonSuffix = findCommonSuffixBytes(a, b);
 
     if (commonPrefix > 0) {
         try list.append(Edit{ .type = .Equal, .range = .{ 0, commonPrefix } });
@@ -63,6 +65,10 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!v
     }
 
     try bisect(a, b, list);
+
+    if (commonSuffix > 0) {
+        try list.append(Edit{ .type = .Equal, .range = .{ @intCast(u32, a.len) - commonSuffix, @intCast(u32, a.len) } });
+    }
 }
 
 // Find the middle snake.
@@ -110,8 +116,8 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
 
     // We start at (0, 0) and (N, M). At these points (equivalently, for these
     // diagonals), we know there are 0-paths, so we can already fill that in.
-    v1[v_offset + 1] = 0;
-    v2[v_offset + 1] = 0;
+    v1.items[v_offset + 1] = 0;
+    v2.items[v_offset + 1] = 0;
 
     // The center (0) for the k diagonals in the **reverse** direction. This is
     // used to translate diagonals between the forward and reverse paths.
@@ -144,29 +150,41 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
         var k1 = -d + k1start;
         while (k1 <= d - k1end) : (k1 += 2) {
             const k1_offset = @intCast(usize, (@intCast(isize, v_offset) + k1));
-            // ????
-            var x1 = if (k1 == -d or (k1 != d and
+            // We are lengthening a D-path by one: we know we will take a
+            // horizontal or a vertical step (if there was a diagonal, it was
+            // consumed in the previous iteration and we're now at the end of
+            // it).
+            //
+            // k1 == -d means we're on the leftmost diagonal, we continue down.
+            // k1 == d means we're on the rightmost diagonal, we continue right.
+            //
+            // To understand the V[K - 1] < V[K + 1] condition, lemma 2 is the
+            // relevant reading. We take the horizontal or vertical step
+            // depending on the shortest path between the one directly on top
+            // and the one directly on the left.
+            var x1: usize = if (k1 == -d or (k1 != d and
                 v1.items[k1_offset - 1] < v1.items[k1_offset + 1]))
-                v1.items[k1_offset + 1]
+                @intCast(usize, v1.items[k1_offset + 1]) // vertical step
             else
-                v1.items[k1_offset - 1] + 1;
+                @intCast(usize, v1.items[k1_offset - 1] + 1); // horizontal step
 
             // Intuition: the diagonal that goes through (0, 0) is k = 0.
             // There, x = y (makes sense visually). The ones above and below it
             // have k = 1 or k = -1, respectively, and there y is one-removed
             // from x. As we move away from the (0, 0) diagonal, the distance
             // grows.
-            var y1 = (x1 - k1);
+            var y1: usize = @intCast(usize, @intCast(isize, x1) - k1);
 
-            // // We have the end of the D-path: (x1, y1). Now let's extend it
-            // // with its snake.
-            // if let (Some(s1), Some(s2)) = (text1.get(x1..), text2.get(y1..)) {
-            // let advance = common_prefix_bytes(s1, s2);
-            // x1 += advance;
-            // y1 += advance;
-            // }
+            // We have the end of the D-path: (x1, y1). Now let's extend it
+            // with its snake.
+            if (x1 < a.len and y1 < b.len) {
+                const prefix = findCommonPrefixBytes(a[x1..], b[y1..]);
+                x1 += prefix;
+                y1 += prefix;
+            }
 
-            v1.items[k1_offset] = x1;
+            // We have the new x for the k1 diagonal.
+            v1.items[k1_offset] = @intCast(isize, x1);
 
             if (x1 > a.len) {
                 // Ran off the right of the graph. We don't need to consider
@@ -177,14 +195,55 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
                 // this diagonal anymore in subsequent iterations.
                 k1start += 2;
             } else if (front) {
+                // The k1 diagonal on the reverse side.
                 const k2_offset: isize = @intCast(isize, v_offset) + @intCast(isize, delta) - @intCast(isize, k1);
+
+                // Do we have a reverse D-path on the k1=k2 diagonal?
                 if (k2_offset >= 0 and k2_offset < v_len and v2.items[@intCast(usize, k2_offset)] != -1) {
                     // Mirror x2 onto top-left coordinate system.
                     const x2 = a.len - @intCast(usize, v2.items[@intCast(usize, k2_offset)]);
+                    // Does the reverse path on the same diagonal go all the
+                    // way to x1? The forward and reverse paths meet, and we
+                    // have found the middle snake!
                     if (x1 >= x2) {
                         // Overlap detected.
-                        // return bisect_split(text1, text2, x1, y1);
-                        unreachable;
+                        return bisect_split(a, b, x1, y1, list);
+                    }
+                }
+            }
+        }
+
+        // Walk the reverse path one step. This is symmetric to the previous
+        // loop, so comments are omitted.
+        var k2 = -d + k2start;
+        while (k2 <= d - k2end) : (k2 += 2) {
+            const k2_offset = @intCast(usize, @intCast(isize, v_offset) + k2);
+            var x2: usize = if (k2 == -d or (k2 != d and v2.items[k2_offset - 1] < v2.items[k2_offset + 1])) @intCast(usize, v2.items[k2_offset + 1]) else @intCast(usize, v2.items[k2_offset - 1] + 1);
+
+            var y2: usize = @intCast(usize, @intCast(isize, x2) - k2);
+
+            if (x2 < a.len and y2 < b.len) {
+                const prefix = findCommonSuffixBytes(a[(a.len - x2)..], b[(b.len - y2)..]);
+                x2 += prefix;
+                y2 += prefix;
+            }
+
+            v2.items[k2_offset] = @intCast(isize, x2);
+
+            if (x2 > a.len) {
+                k2end += 2;
+            } else if (y2 > b.len) {
+                // Ran off the top of the graph.
+                k2start += 2;
+            } else if (!front) {
+                const k1_offset = @intCast(isize, v_offset) + delta - k2;
+                if (k1_offset >= 0 and k1_offset < @intCast(isize, v_len) and v1.items[@intCast(usize, k1_offset)] != -1) {
+                    const x1 = @intCast(usize, v1.items[@intCast(usize, k1_offset)]);
+                    const y1 = v_offset + x1 - @intCast(usize, k1_offset);
+                    // Mirror x2 onto top-left coordinate system.
+                    x2 = a.len - x2;
+                    if (x1 >= x2) {
+                        return bisect_split(a, b, x1, y1, list);
                     }
                 }
             }
@@ -196,6 +255,16 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     try list.appendSlice(&.{ Edit.newDelete(0, @intCast(u32, a.len)), Edit.newInsert(0, @intCast(u32, b.len)) });
 }
 
+fn bisect_split(a: []const u8, b: []const u8, x1: usize, y1: usize, list: *std.ArrayList(Edit)) !void {
+    const a1 = a[0..x1];
+    const b1 = b[0..y1];
+    const a2 = a[x1..];
+    const b2 = b[y1..];
+
+    try diff(a1, b1, list);
+    try diff(a2, b2, list);
+}
+
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
     return std.unicode.Utf8Iterator{ .bytes = it.bytes, .i = it.i };
 }
@@ -203,16 +272,16 @@ fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
 /// Returns the common suffix length in _bytes_. It also advances the iterators.
 fn findCommonSuffixBytes(a: []const u8, b: []const u8) u32 {
     const max = std.math.min(a.len, b.len);
-    var i = 0;
-    while (i <= max and a[a.len - (i + 1)] == b[b.len - (i + 1)]) : (i += 1) {}
+    var i: u32 = 0;
+    while (i < max and a[a.len - (i + 1)] == b[b.len - (i + 1)]) : (i += 1) {}
     return i;
 }
 
 /// Returns the common suffix length in _bytes_. It also advances the iterators.
 fn findCommonPrefixBytes(a: []const u8, b: []const u8) u32 {
     const max = std.math.min(a.len, b.len);
-    var i = 0;
-    while (i <= max and a[i] == b[i]) : (i += 1) {}
+    var i: u32 = 0;
+    while (i < max and a[i] == b[i]) : (i += 1) {}
     return i;
 }
 
