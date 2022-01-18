@@ -29,16 +29,16 @@ const Edit = struct {
     /// .{start, end} offsets.
     range: [2]u32,
 
-    pub fn newDelete(start: u32, end: u32) @This() {
-        return Edit{ .type = .Delete, .range = .{ start, end } };
+    pub fn newDelete(start: anytype, end: anytype) @This() {
+        return Edit{ .type = .Delete, .range = .{ @intCast(u32, start), @intCast(u32, end) } };
     }
 
-    pub fn newInsert(start: u32, end: u32) @This() {
-        return Edit{ .type = .Insert, .range = .{ start, end } };
+    pub fn newInsert(start: anytype, end: anytype) @This() {
+        return Edit{ .type = .Insert, .range = .{ @intCast(u32, start), @intCast(u32, end) } };
     }
 
-    pub fn newEqual(start: u32, end: u32) @This() {
-        return Edit{ .type = .Equal, .range = .{ start, end } };
+    pub fn newEqual(start: anytype, end: anytype) @This() {
+        return Edit{ .type = .Equal, .range = .{ @intCast(u32, start), @intCast(u32, end) } };
     }
 };
 
@@ -47,23 +47,33 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!v
     const commonSuffix = ends.findCommonSuffix(a, b);
 
     if (commonPrefix > 0) {
-        try list.append(Edit{ .type = .Equal, .range = .{ 0, commonPrefix } });
+        try list.append(Edit{ .type = .Equal, .range = .{ 0, @intCast(u32, commonPrefix) } });
     }
 
     if (a.len == commonPrefix) {
         if (b.len != commonPrefix) {
-            try list.append(Edit.newInsert(commonPrefix, @intCast(u32, b.len) - commonPrefix));
+            try list.append(Edit.newInsert(@intCast(u32, commonPrefix), @intCast(u32, b.len - commonPrefix)));
         }
         return;
     } else if (b.len == commonPrefix) {
-        try list.append(Edit.newDelete(commonPrefix, @intCast(u32, a.len) - commonPrefix));
+        try list.append(Edit.newDelete(@intCast(u32, commonPrefix), @intCast(u32, a.len - commonPrefix)));
+        return;
+    }
+
+    if (a.len == commonSuffix) {
+        if (b.len != commonSuffix) {
+            try list.append(Edit.newInsert(0, b.len - commonSuffix));
+        }
+        return;
+    } else if (b.len == commonSuffix) {
+        try list.append(Edit.newDelete(0, a.len - commonSuffix));
         return;
     }
 
     try bisect(a, b, list);
 
     if (commonSuffix > 0) {
-        try list.append(Edit{ .type = .Equal, .range = .{ @intCast(u32, a.len) - commonSuffix, @intCast(u32, a.len) } });
+        try list.append(Edit{ .type = .Equal, .range = .{ @intCast(u32, a.len - commonSuffix), @intCast(u32, a.len) } });
     }
 }
 
@@ -144,7 +154,7 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
         // Every second k (diagonal) is considered, because that is where a D
         // path of length d must end (lemma 1 in the paper).
         var k1 = -d + k1start;
-        while (k1 <= d - k1end) : (k1 += 2) {
+        while (k1 <= d - k1end) {
             const k1_offset = @intCast(usize, (@intCast(isize, v_offset) + k1));
             // We are lengthening a D-path by one: we know we will take a
             // horizontal or a vertical step (if there was a diagonal, it was
@@ -174,8 +184,8 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
             // We have the end of the D-path: (x1, y1). Now let's extend it
             // with its snake.
             if (x1 < a.len and y1 < b.len) {
-                const prefix = ends.findCommonPrefix(a, b);
-                // const prefix = findCommonPrefix(a[x1..], b[y1..]);
+                const prefix = ends.findCommonPrefixBytes(a[x1..], b[y1..]);
+                // std.debug.print("a.len: {d}\nx1: {d}\nprefix: {d}\n", .{ a.len, x1, prefix });
                 x1 += prefix;
                 y1 += prefix;
             }
@@ -208,21 +218,23 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
                     }
                 }
             }
+
+            k1 += 2;
         }
 
         // Walk the reverse path one step. This is symmetric to the previous
         // loop, so comments are omitted.
         var k2 = -d + k2start;
-        while (k2 <= d - k2end) : (k2 += 2) {
+        while (k2 <= d - k2end) {
             const k2_offset = @intCast(usize, @intCast(isize, v_offset) + k2);
             var x2: usize = if (k2 == -d or (k2 != d and v2.items[k2_offset - 1] < v2.items[k2_offset + 1])) @intCast(usize, v2.items[k2_offset + 1]) else @intCast(usize, v2.items[k2_offset - 1] + 1);
 
             var y2: usize = @intCast(usize, @intCast(isize, x2) - k2);
 
             if (x2 < a.len and y2 < b.len) {
-                const prefix = ends.findCommonSuffix(a[(a.len - x2)..], b[(b.len - y2)..]);
-                x2 += prefix;
-                y2 += prefix;
+                const suffix = ends.findCommonSuffixBytes(a[0..(a.len - x2)], b[0..(b.len - y2)]);
+                x2 += suffix;
+                y2 += suffix;
             }
 
             v2.items[k2_offset] = @intCast(isize, x2);
@@ -239,11 +251,14 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
                     const y1 = v_offset + x1 - @intCast(usize, k1_offset);
                     // Mirror x2 onto top-left coordinate system.
                     x2 = a.len - x2;
+                    // std.debug.print("in back loop: {{ a.len: {d}\nx1: {d}\n}}\n", .{ a.len, x1 });
                     if (x1 >= x2) {
                         return bisect_split(a, b, x1, y1, list);
                     }
                 }
             }
+
+            k2 += 2;
         }
     }
 
@@ -253,10 +268,21 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
 }
 
 fn bisect_split(a: []const u8, b: []const u8, x1: usize, y1: usize, list: *std.ArrayList(Edit)) !void {
-    const a1 = a[0..x1];
-    const b1 = b[0..y1];
-    const a2 = a[x1..];
-    const b2 = b[y1..];
+    var x1utf8 = x1;
+    var y1utf8 = y1;
+    ends.alignUtf8Backward(a, &x1utf8);
+    ends.alignUtf8Backward(b, &y1utf8);
+
+    const a1 = a[0..x1utf8];
+    const b1 = b[0..y1utf8];
+
+    const a2 = a[x1utf8..];
+    const b2 = b[y1utf8..];
+
+    std.debug.assert(unicode.utf8ValidateSlice(a1));
+    std.debug.assert(unicode.utf8ValidateSlice(a2));
+    std.debug.assert(unicode.utf8ValidateSlice(b1));
+    std.debug.assert(unicode.utf8ValidateSlice(b2));
 
     try diff(a1, b1, list);
     try diff(a2, b2, list);
@@ -264,22 +290,6 @@ fn bisect_split(a: []const u8, b: []const u8, x1: usize, y1: usize, list: *std.A
 
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
     return std.unicode.Utf8Iterator{ .bytes = it.bytes, .i = it.i };
-}
-
-/// Returns the common suffix length in _bytes_. It also advances the iterators.
-fn findCommonSuffixBytes(a: []const u8, b: []const u8) u32 {
-    const max = std.math.min(a.len, b.len);
-    var i: u32 = 0;
-    while (i < max and a[a.len - (i + 1)] == b[b.len - (i + 1)]) : (i += 1) {}
-    return i;
-}
-
-/// Returns the common suffix length in _bytes_. It also advances the iterators.
-fn findCommonPrefixBytes(a: []const u8, b: []const u8) u32 {
-    const max = std.math.min(a.len, b.len);
-    var i: u32 = 0;
-    while (i < max and a[i] == b[i]) : (i += 1) {}
-    return i;
 }
 
 // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
@@ -321,8 +331,9 @@ test "compileDiffSpec works" {
 }
 
 test "basic diff tests" {
-    try expectDiffRoundtrip("$-meow$+woofwoof");
+    // try expectDiffRoundtrip("$-meow$+woofwoof");
     try expectDiffRoundtrip("$=nononono");
+    try expectDiffRoundtrip("$=[w$-a$+u$=t]");
 }
 
 fn expectDiffRoundtrip(comptime spec: []const u8) anyerror!void {
@@ -332,6 +343,7 @@ fn expectDiffRoundtrip(comptime spec: []const u8) anyerror!void {
     defer diffed.deinit();
     try diff(ds.a, ds.b, &diffed);
     try testing.expectEqualSlices(Edit, ds.diff, diffed.items) catch |err| blk: {
+        std.debug.print("=== expected ===\n{s}\n\n=== actual ===\n{s}\n", .{ ds.diff, diffed.items });
         var dsDiff = std.ArrayList(u8).init(ally);
         defer dsDiff.deinit();
         try debugFmtDiff(ds.a, ds.b, ds.diff, dsDiff.writer());
