@@ -20,6 +20,7 @@
 const std = @import("std");
 const testing = std.testing;
 const unicode = std.unicode;
+const ends = @import("./ends.zig");
 
 const EditType = enum { Delete, Insert, Equal };
 
@@ -42,13 +43,8 @@ const Edit = struct {
 };
 
 pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!void {
-    const aView = try std.unicode.Utf8View.init(a[0..]);
-    const bView = try std.unicode.Utf8View.init(b[0..]);
-    var aIter = aView.iterator();
-    var bIter = bView.iterator();
-    const commonPrefix = findCommonPrefix(&aIter, &bIter);
-    // TODO: make it utf-8 aware.
-    const commonSuffix = findCommonSuffixBytes(a, b);
+    const commonPrefix = ends.findCommonPrefix(a, b);
+    const commonSuffix = ends.findCommonSuffix(a, b);
 
     if (commonPrefix > 0) {
         try list.append(Edit{ .type = .Equal, .range = .{ 0, commonPrefix } });
@@ -178,7 +174,8 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
             // We have the end of the D-path: (x1, y1). Now let's extend it
             // with its snake.
             if (x1 < a.len and y1 < b.len) {
-                const prefix = findCommonPrefixBytes(a[x1..], b[y1..]);
+                const prefix = ends.findCommonPrefix(a, b);
+                // const prefix = findCommonPrefix(a[x1..], b[y1..]);
                 x1 += prefix;
                 y1 += prefix;
             }
@@ -223,7 +220,7 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
             var y2: usize = @intCast(usize, @intCast(isize, x2) - k2);
 
             if (x2 < a.len and y2 < b.len) {
-                const prefix = findCommonSuffixBytes(a[(a.len - x2)..], b[(b.len - y2)..]);
+                const prefix = ends.findCommonSuffix(a[(a.len - x2)..], b[(b.len - y2)..]);
                 x2 += prefix;
                 y2 += prefix;
             }
@@ -285,24 +282,6 @@ fn findCommonPrefixBytes(a: []const u8, b: []const u8) u32 {
     return i;
 }
 
-/// Returns the common prefix length in _bytes_. It also advances the iterators.
-fn findCommonPrefix(a: *std.unicode.Utf8Iterator, b: *std.unicode.Utf8Iterator) u32 {
-    // First, determine the common prefix as an optimization.
-    var commonPrefix: u32 = 0;
-
-    while (a.nextCodepointSlice()) |aNext| {
-        const bNext = b.nextCodepointSlice() orelse break;
-
-        if (!std.mem.eql(u8, aNext, bNext)) {
-            break;
-        }
-
-        commonPrefix += @intCast(u32, aNext.len);
-    }
-
-    return commonPrefix;
-}
-
 // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
 test "diff emojis" {
     const ally = testing.allocator;
@@ -343,6 +322,7 @@ test "compileDiffSpec works" {
 
 test "basic diff tests" {
     try expectDiffRoundtrip("$-meow$+woofwoof");
+    try expectDiffRoundtrip("$=nononono");
 }
 
 fn expectDiffRoundtrip(comptime spec: []const u8) anyerror!void {
