@@ -20,6 +20,7 @@ const debug = std.debug;
 const testing = std.testing;
 const unicode = std.unicode;
 const ends = @import("./ends.zig");
+const Range = @import("range.zig").Range;
 
 const EditType = enum { Delete, Insert, Equal };
 
@@ -43,98 +44,43 @@ const Edit = struct {
     }
 };
 
-/// This is used to keep track of a subslice of a slice _and where it is in the
-/// original slice_. We need this because when bisecting, we are operating on
-/// subslices, but we want to emit `Edit`s with ranges in the original slice.
-const Range = struct {
-    txt: []const u8,
-    start: usize,
-    end: usize,
-
-    const Self = @This();
-
-    fn new(txt: []const u8) Self {
-        return Range{ .txt = txt, .start = 0, .end = txt.len };
-    }
-
-    fn splitAt(self: Self, n: usize) [2]Self {
-        return .{ self.firstN(n), self.clampLeft(n) };
-    }
-
-    /// Shorten the subslice by `left` on the left.
-    fn clampLeft(self: Self, left: usize) Self {
-        std.debug.assert(left <= self.len());
-        return Range{ .txt = self.txt, .start = self.start + left, .end = self.end };
-    }
-
-    /// Shorten the subslice by `right` on the right.
-    fn clampRight(self: Self, right: usize) Self {
-        std.debug.assert(right <= self.len());
-        return Range{ .txt = self.txt, .start = self.start, .end = self.end - right };
-    }
-
-    /// Shorten the range from both sides simultaneously.
-    fn clamp(self: Self, left: usize, right: usize) Self {
-        std.debug.assert(left + right <= self.len());
-        return self.clampLeft(left).clampRight(right);
-    }
-
-    fn firstN(self: Self, n: usize) Range {
-        std.debug.assert(n <= self.len());
-        return Range{ .txt = self.txt, .start = self.start, .end = self.start + n };
-    }
-
-    fn lastN(self: Self, n: usize) Range {
-        std.debug.assert(n <= self.len());
-        return Range{ .txt = self.txt, .start = self.end - n, .end = self.end };
-    }
-
-    fn subslice(self: Self) []const u8 {
-        return self.txt[self.start..self.end];
-    }
-
-    fn len(self: Self) usize {
-        return self.end - self.start;
-    }
-};
-
 fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
-    const commonPrefix = ends.findCommonPrefix(a.subslice(), b.subslice());
-    const commonSuffix = ends.findCommonSuffix(a.subslice(), b.subslice());
+    const commonPrefix = ends.findCommonPrefix(a, b);
+    const commonSuffix = ends.findCommonSuffix(a, b);
 
-    if (commonPrefix > 0) {
-        try list.append(Edit.newEqual(a.firstN(commonPrefix)));
+    if (commonPrefix.len() > 0) {
+        try list.append(Edit.newEqual(commonPrefix));
     }
 
-    if (a.len() == commonPrefix) {
-        if (b.len() != commonPrefix) {
-            try list.append(Edit.newInsert(b.clampLeft(commonPrefix)));
+    if (a.len() == commonPrefix.len()) {
+        if (b.len() != commonPrefix.len()) {
+            try list.append(Edit.newInsert(b.clampLeft(commonPrefix.len())));
         }
         return;
-    } else if (b.len() == commonPrefix) {
-        try list.append(Edit.newDelete(a.clampLeft(commonPrefix)));
+    } else if (b.len() == commonPrefix.len()) {
+        try list.append(Edit.newDelete(a.clampLeft(commonPrefix.len())));
         return;
     }
 
-    if (a.len() == commonSuffix) {
-        if (b.len() != commonSuffix) {
-            try list.append(Edit.newInsert(b.clampRight(commonSuffix)));
+    if (a.len() == commonSuffix.len()) {
+        if (b.len() != commonSuffix.len()) {
+            try list.append(Edit.newInsert(b.clampRight(commonSuffix.len())));
         }
         return;
-    } else if (b.len() == commonSuffix) {
-        try list.append(Edit.newDelete(a.clampRight(commonSuffix)));
+    } else if (b.len() == commonSuffix.len()) {
+        try list.append(Edit.newDelete(a.clampRight(commonSuffix.len())));
         return;
     }
 
-    std.debug.print("commonPrefix: {d}, commonSuffix: {d}, original: {s}, clamped: {s}\n\n", .{ commonPrefix, commonSuffix, a.subslice(), a.clamp(commonPrefix, commonSuffix).subslice() });
+    // std.debug.print("commonPrefix: {d}, commonSuffix: {d}, original: {s}, clamped: {s}\n\n", .{ commonPrefix, commonSuffix, a.subslice(), a.clamp(commonPrefix, commonSuffix).subslice() });
 
-    const aClamped = a.clamp(commonPrefix, commonSuffix);
-    const bClamped = b.clamp(commonPrefix, commonSuffix);
+    const aClamped = a.clamp(commonPrefix.len(), commonSuffix.len());
+    const bClamped = b.clamp(commonPrefix.len(), commonSuffix.len());
 
     try bisect(aClamped, bClamped, list);
 
-    if (commonSuffix > 0) {
-        try list.append(Edit.newEqual(a.lastN(commonSuffix)));
+    if (commonSuffix.len() > 0) {
+        try list.append(Edit.newEqual(commonSuffix));
     }
 }
 
@@ -256,10 +202,10 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
             // We have the end of the D-path: (x1, y1). Now let's extend it
             // with its snake.
             if (x1 < a.len() and y1 < b.len()) {
-                const prefix = ends.findCommonPrefixBytes(a.subslice()[x1..], b.subslice()[y1..]);
+                const prefix = ends.findCommonPrefixBytes(a.clampLeft(x1), b.clampLeft(y1));
                 // std.debug.print("a.len: {d}\nx1: {d}\nprefix: {d}\n", .{ a.len, x1, prefix });
-                x1 += prefix;
-                y1 += prefix;
+                x1 += prefix.len();
+                y1 += prefix.len();
             }
 
             // We have the new x for the k1 diagonal.
@@ -304,9 +250,9 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
             var y2: usize = @intCast(usize, @intCast(isize, x2) - k2);
 
             if (x2 < a.len() and y2 < b.len()) {
-                const suffix = ends.findCommonSuffixBytes(a.subslice()[0..(a.len() - x2)], b.subslice()[0..(b.len() - y2)]);
-                x2 += suffix;
-                y2 += suffix;
+                const suffix = ends.findCommonSuffixBytes(a.clampRight(x2), b.clampRight(y2));
+                x2 += suffix.len();
+                y2 += suffix.len();
             }
 
             v2.items[k2_offset] = @intCast(isize, x2);
@@ -340,22 +286,26 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
 }
 
 fn bisect_split(a: Range, b: Range, x1: usize, y1: usize, list: *std.ArrayList(Edit)) anyerror!void {
-    var x1utf8 = x1;
-    var y1utf8 = y1;
-    std.debug.print("{s} <- {d}", .{ a.subslice(), x1utf8 });
-    ends.alignUtf8Backward(a.subslice(), &x1utf8);
-    ends.alignUtf8Backward(b.subslice(), &y1utf8);
+    // var x1utf8 = x1;
+    // var y1utf8 = y1;
+    // std.debug.print("{s} <- {d}", .{ a.subslice(), x1utf8 });
+    // ends.alignUtf8Backward(a.subslice(), &x1utf8);
+    // ends.alignUtf8Backward(b.subslice(), &y1utf8);
 
-    const as = a.splitAt(x1utf8);
-    const bs = b.splitAt(y1utf8);
+    var as = a.splitAt(x1);
+    var bs = b.splitAt(y1);
 
-    std.debug.assert(unicode.utf8ValidateSlice(as[0].subslice()));
-    std.debug.assert(unicode.utf8ValidateSlice(as[1].subslice()));
-    std.debug.assert(unicode.utf8ValidateSlice(bs[0].subslice()));
-    std.debug.assert(unicode.utf8ValidateSlice(bs[1].subslice()));
+    ends.alignUtf8(&as[0]);
+    ends.alignUtf8(&bs[0]);
+    ends.alignUtf8(&as[1]);
+    ends.alignUtf8(&bs[1]);
 
-    try main(as[0], as[1], list);
-    try main(bs[0], bs[1], list);
+    // std.debug.assert(unicode.utf8ValidateSlice(as[0].subslice()));
+    // std.debug.assert(unicode.utf8ValidateSlice(as[1].subslice()));
+    // std.debug.assert(unicode.utf8ValidateSlice(bs[0].subslice()));
+    // std.debug.assert(unicode.utf8ValidateSlice(bs[1].subslice()));
+    try main(as[0], bs[0], list);
+    try main(as[1], bs[1], list);
 }
 
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {

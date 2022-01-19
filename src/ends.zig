@@ -1,20 +1,19 @@
 const std = @import("std");
 const testing = std.testing;
 const unicode = std.unicode;
+const Range = @import("range.zig").Range;
 
 /// Returns the common prefix length in _bytes_. It also advances the iterators.
-pub fn findCommonPrefix(a: []const u8, b: []const u8) usize {
+pub fn findCommonPrefix(a: Range, b: Range) Range {
     var bytesPrefix = findCommonPrefixBytes(a, b);
-    if (bytesPrefix > 0 and bytesPrefix < a.len) {
-        alignUtf8Backward(a, &bytesPrefix);
-    }
+    alignUtf8(&bytesPrefix);
     return bytesPrefix;
 }
 
 fn assertCommonPrefix(a: []const u8, b: []const u8, expectedPrefix: []const u8) !void {
-    const prefixLength = findCommonPrefix(a, b);
-    try testing.expectEqualSlices(u8, expectedPrefix, a[0..prefixLength]);
-    try testing.expectEqualSlices(u8, expectedPrefix, b[0..prefixLength]);
+    const prefix = findCommonPrefix(Range.new(a), Range.new(b));
+    try testing.expectEqualSlices(u8, expectedPrefix, prefix.subslice());
+    try testing.expectEqualSlices(u8, expectedPrefix, b[0..prefix.end]);
 }
 
 test "ascii prefix" {
@@ -33,16 +32,15 @@ test "tricky multibyte prefix" {
 }
 
 /// Returns the common suffix length in _bytes_.
-pub fn findCommonSuffix(a: []const u8, b: []const u8) usize {
+pub fn findCommonSuffix(a: Range, b: Range) Range {
     var bytesSuffix = findCommonSuffixBytes(a, b);
-    alignUtf8Forward(a, &bytesSuffix);
+    alignUtf8(&bytesSuffix);
     return bytesSuffix;
 }
 
 fn assertCommonSuffix(a: []const u8, b: []const u8, expectedSuffix: []const u8) !void {
-    const suffixLength = findCommonSuffix(a, b);
-    try testing.expectEqualSlices(u8, expectedSuffix, a[a.len - suffixLength ..]);
-    try testing.expectEqualSlices(u8, expectedSuffix, b[b.len - suffixLength ..]);
+    const suffix = findCommonSuffix(Range.new(a), Range.new(b));
+    try testing.expectEqualSlices(u8, expectedSuffix, suffix.subslice());
 }
 
 test "ascii suffix" {
@@ -59,67 +57,77 @@ test "ascii suffix of multibyte stringss" {
     try assertCommonSuffix(left, right, "]");
 }
 
-/// Returns the common suffix length in _bytes_, ignoring utf-8 character boundaries.
-pub fn findCommonSuffixBytes(a: []const u8, b: []const u8) usize {
-    const max = @intCast(u32, std.math.min(a.len, b.len));
+/// Returns the common suffix in _bytes_, ignoring utf-8 character boundaries.
+pub fn findCommonSuffixBytes(a: Range, b: Range) Range {
+    const max = @intCast(u32, std.math.min(a.len(), b.len()));
 
     if (max == 0) {
-        return 0;
+        return Range.new("");
     }
 
     var i: u32 = 0;
 
-    while (i < max and a[(a.len - 1) - i] == b[(b.len - 1) - i]) {
+    while (i < max and a.subslice()[(a.len() - 1) - i] == b.subslice()[(b.len() - 1) - i]) {
         i += 1;
     }
 
-    // // "rewind" to the next utf-8 character boundary
-    // while (i < (max - 1)) {
-    //     _ = unicode.utf8ByteSequenceLength(a[i]) catch {
-    //         i += 1;
-    //         continue;
-    //     };
-
-    //     break;
-    // }/scii
-
-    return i;
+    return a.lastN(i);
 }
 
-/// Returns the common suffix length in _bytes_, ignoring utf-8 character boundaries.
-pub fn findCommonPrefixBytes(a: []const u8, b: []const u8) usize {
-    const max = std.math.min(a.len, b.len);
+/// Returns the common suffix, ignoring utf-8 character boundaries.
+pub fn findCommonPrefixBytes(a: Range, b: Range) Range {
+    const max = std.math.min(a.len(), b.len());
     var i: u32 = 0;
-    while (i < max and a[i] == b[i]) : (i += 1) {}
-    return i;
+    while (i < max and a.subslice()[i] == b.subslice()[i]) : (i += 1) {}
+    return a.firstN(i);
 }
 
-/// Given an arbitrary index in a byte slice, return the index of the first
-/// byte of the _next_ valid UTF-8 sequence.
+///// Given an arbitrary index in a byte slice, return the index of the first
+///// byte of the _next_ valid UTF-8 sequence.
+/////
+///// Invariant: alignUtf8Forward(s, idx) >= idx.
+//pub fn alignUtf8Forward(s: []const u8, idx: *usize) void {
+//    while (idx.* < s.len) {
+//        _ = unicode.utf8ByteSequenceLength(s[idx.*]) catch {
+//            idx.* += 1;
+//            continue;
+//        };
+//        break;
+//    }
+//}
+
+/// Given an arbitrary byte slice, extend it to UTF-8 character boundaries.
 ///
-/// Invariant: alignUtf8Forward(s, idx) >= idx.
-pub fn alignUtf8Forward(s: []const u8, idx: *usize) void {
-    while (idx.* < s.len) {
-        _ = unicode.utf8ByteSequenceLength(s[idx.*]) catch {
-            idx.* += 1;
+/// This is made with commonPrefix and commonSuffix in mind: on the right, it
+/// will clamp the end of the range to the _end of the last complete common
+/// UTF-8 sequence_. On the left, it will clamp the start of the range to the
+/// _beginning of the first common UTF-8 sequence_.
+pub fn alignUtf8(s: *Range) void {
+    // left
+    while (true) {
+        if (s.len() == 0) {
+            return;
+        }
+
+        _ = unicode.utf8ByteSequenceLength(s.subslice()[0]) catch {
+            s.* = s.clampLeft(1);
             continue;
         };
         break;
     }
-}
 
-/// Given an arbitrary index in a byte slice, return the index of the first
-/// byte of the valid UTF-8 sequence s[idx] is a part of.
-///
-/// Invariant: alignUtf8Backward(s, idx) <= idx.
-pub fn alignUtf8Backward(s: []const u8, idx: *usize) void {
-    if (idx.* == s.len) {
+    if (s.end == s.txt.len) {
         return;
     }
 
-    while (idx.* > 0) {
-        _ = unicode.utf8ByteSequenceLength(s[idx.*]) catch {
-            idx.* -= 1;
+    // right
+    while (true) {
+        if (s.len() == 0) {
+            return;
+        }
+
+        _ = unicode.utf8ByteSequenceLength(s.txt[s.end]) catch {
+            s.* = s.clampRight(1);
             continue;
         };
         break;
