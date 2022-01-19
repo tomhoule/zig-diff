@@ -14,10 +14,9 @@
 //!     an Equal edit of length len(A), and between 0 and 2 Insert edits.
 //!   Equivalently, D is the length of a D-path.
 //!
-//! ## Diffs
-//! - Always deletes, then inserts.
 
 const std = @import("std");
+const debug = std.debug;
 const testing = std.testing;
 const unicode = std.unicode;
 const ends = @import("./ends.zig");
@@ -29,64 +28,134 @@ const Edit = struct {
     /// .{start, end} offsets.
     range: [2]u32,
 
-    pub fn newDelete(start: anytype, end: anytype) @This() {
-        return Edit{ .type = .Delete, .range = .{ @intCast(u32, start), @intCast(u32, end) } };
+    const Self = @This();
+
+    pub fn newDelete(range: Range) Self {
+        return Edit{ .type = .Delete, .range = .{ @intCast(u32, range.start), @intCast(u32, range.end) } };
     }
 
-    pub fn newInsert(start: anytype, end: anytype) @This() {
-        return Edit{ .type = .Insert, .range = .{ @intCast(u32, start), @intCast(u32, end) } };
+    pub fn newInsert(range: Range) Self {
+        return Edit{ .type = .Insert, .range = .{ @intCast(u32, range.start), @intCast(u32, range.end) } };
     }
 
-    pub fn newEqual(start: anytype, end: anytype) @This() {
-        return Edit{ .type = .Equal, .range = .{ @intCast(u32, start), @intCast(u32, end) } };
+    pub fn newEqual(range: Range) Self {
+        return Edit{ .type = .Equal, .range = .{ @intCast(u32, range.start), @intCast(u32, range.end) } };
     }
 };
 
-pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) anyerror!void {
-    const commonPrefix = ends.findCommonPrefix(a, b);
-    const commonSuffix = ends.findCommonSuffix(a, b);
+/// This is used to keep track of a subslice of a slice _and where it is in the
+/// original slice_. We need this because when bisecting, we are operating on
+/// subslices, but we want to emit `Edit`s with ranges in the original slice.
+const Range = struct {
+    txt: []const u8,
+    start: usize,
+    end: usize,
+
+    const Self = @This();
+
+    fn new(txt: []const u8) Self {
+        return Range{ .txt = txt, .start = 0, .end = txt.len };
+    }
+
+    fn splitAt(self: Self, n: usize) [2]Self {
+        return .{ self.firstN(n), self.clampLeft(n) };
+    }
+
+    /// Shorten the subslice by `left` on the left.
+    fn clampLeft(self: Self, left: usize) Self {
+        std.debug.assert(left <= self.len());
+        return Range{ .txt = self.txt, .start = self.start + left, .end = self.end };
+    }
+
+    /// Shorten the subslice by `right` on the right.
+    fn clampRight(self: Self, right: usize) Self {
+        std.debug.assert(right <= self.len());
+        return Range{ .txt = self.txt, .start = self.start, .end = self.end - right };
+    }
+
+    /// Shorten the range from both sides simultaneously.
+    fn clamp(self: Self, left: usize, right: usize) Self {
+        std.debug.assert(left + right <= self.len());
+        return self.clampLeft(left).clampRight(right);
+    }
+
+    fn firstN(self: Self, n: usize) Range {
+        std.debug.assert(n <= self.len());
+        return Range{ .txt = self.txt, .start = self.start, .end = self.start + n };
+    }
+
+    fn lastN(self: Self, n: usize) Range {
+        std.debug.assert(n <= self.len());
+        return Range{ .txt = self.txt, .start = self.end - n, .end = self.end };
+    }
+
+    fn subslice(self: Self) []const u8 {
+        return self.txt[self.start..self.end];
+    }
+
+    fn len(self: Self) usize {
+        return self.end - self.start;
+    }
+};
+
+fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
+    const commonPrefix = ends.findCommonPrefix(a.subslice(), b.subslice());
+    const commonSuffix = ends.findCommonSuffix(a.subslice(), b.subslice());
 
     if (commonPrefix > 0) {
-        try list.append(Edit{ .type = .Equal, .range = .{ 0, @intCast(u32, commonPrefix) } });
+        try list.append(Edit.newEqual(a.firstN(commonPrefix)));
     }
 
-    if (a.len == commonPrefix) {
-        if (b.len != commonPrefix) {
-            try list.append(Edit.newInsert(@intCast(u32, commonPrefix), @intCast(u32, b.len - commonPrefix)));
+    if (a.len() == commonPrefix) {
+        if (b.len() != commonPrefix) {
+            try list.append(Edit.newInsert(b.clampLeft(commonPrefix)));
         }
         return;
-    } else if (b.len == commonPrefix) {
-        try list.append(Edit.newDelete(@intCast(u32, commonPrefix), @intCast(u32, a.len - commonPrefix)));
+    } else if (b.len() == commonPrefix) {
+        try list.append(Edit.newDelete(a.clampLeft(commonPrefix)));
         return;
     }
 
-    if (a.len == commonSuffix) {
-        if (b.len != commonSuffix) {
-            try list.append(Edit.newInsert(0, b.len - commonSuffix));
+    if (a.len() == commonSuffix) {
+        if (b.len() != commonSuffix) {
+            try list.append(Edit.newInsert(b.clampRight(commonSuffix)));
         }
         return;
-    } else if (b.len == commonSuffix) {
-        try list.append(Edit.newDelete(0, a.len - commonSuffix));
+    } else if (b.len() == commonSuffix) {
+        try list.append(Edit.newDelete(a.clampRight(commonSuffix)));
         return;
     }
 
-    try bisect(a, b, list);
+    std.debug.print("commonPrefix: {d}, commonSuffix: {d}, original: {s}, clamped: {s}\n\n", .{ commonPrefix, commonSuffix, a.subslice(), a.clamp(commonPrefix, commonSuffix).subslice() });
+
+    const aClamped = a.clamp(commonPrefix, commonSuffix);
+    const bClamped = b.clamp(commonPrefix, commonSuffix);
+
+    try bisect(aClamped, bClamped, list);
 
     if (commonSuffix > 0) {
-        try list.append(Edit{ .type = .Equal, .range = .{ @intCast(u32, a.len - commonSuffix), @intCast(u32, a.len) } });
+        try list.append(Edit.newEqual(a.lastN(commonSuffix)));
     }
 }
 
+pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
+    const aRange = Range.new(a);
+    const bRange = Range.new(b);
+    try main(aRange, bRange, list);
+}
+
 // Find the middle snake.
-fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
+fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
     // TODO: remove.
     const ally = std.heap.page_allocator;
+
+    std.debug.print("a.len() = {d}, b.len() = {d}\n", .{ a.len(), b.len() });
 
     // Since D = 2(N - L), if the strings have nothing in common (L=0), D = N =
     // len(A) + len(B). We divide by two because we are using a divide and
     // conquer approach, where we find the middle snake starting simultaneously
     // in opposite directions in the graph.
-    const max_d = (a.len + b.len + 1) / 2;
+    const max_d = (a.len() + b.len() + 1) / 2;
 
     // V arrays.
     //
@@ -105,6 +174,8 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     // The indices of V should be thought of as ranging [-max_d, max_d].
     const v_len = 2 * max_d;
 
+    debug.print("v_len = {d}, v_offset = {d}\n", .{ v_len, v_offset });
+
     // The V array for **forward** paths.
     var v1 = try std.ArrayList(isize).initCapacity(ally, v_len);
     // The V array for **reverse** paths.
@@ -114,9 +185,10 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
 
     {
         var i: usize = 0;
-        while (i < v_len) : (i += 1) {
+        while (i <= v_len) {
             v1.appendAssumeCapacity(-1);
             v2.appendAssumeCapacity(-1);
+            i += 1;
         }
     }
 
@@ -128,7 +200,7 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     // The center (0) for the k diagonals in the **reverse** direction. This is
     // used to translate diagonals between the forward and reverse paths.
     // Finding the middle snake means finding a diagonal, so this is important.
-    const delta: isize = @intCast(isize, a.len) - @intCast(isize, b.len);
+    const delta: isize = @intCast(isize, a.len()) - @intCast(isize, b.len());
 
     // If the total number of characters is odd, then the forward path will
     // collide with the reverse path.
@@ -183,8 +255,8 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
 
             // We have the end of the D-path: (x1, y1). Now let's extend it
             // with its snake.
-            if (x1 < a.len and y1 < b.len) {
-                const prefix = ends.findCommonPrefixBytes(a[x1..], b[y1..]);
+            if (x1 < a.len() and y1 < b.len()) {
+                const prefix = ends.findCommonPrefixBytes(a.subslice()[x1..], b.subslice()[y1..]);
                 // std.debug.print("a.len: {d}\nx1: {d}\nprefix: {d}\n", .{ a.len, x1, prefix });
                 x1 += prefix;
                 y1 += prefix;
@@ -193,11 +265,11 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
             // We have the new x for the k1 diagonal.
             v1.items[k1_offset] = @intCast(isize, x1);
 
-            if (x1 > a.len) {
+            if (x1 > a.len()) {
                 // Ran off the right of the graph. We don't need to consider
                 // this diagonal anymore in subsequent iterations.
                 k1end += 2;
-            } else if (y1 > b.len) {
+            } else if (y1 > b.len()) {
                 // Ran off the bottom of the graph. We don't need to consider
                 // this diagonal anymore in subsequent iterations.
                 k1start += 2;
@@ -208,7 +280,7 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
                 // Do we have a reverse D-path on the k1=k2 diagonal?
                 if (k2_offset >= 0 and k2_offset < v_len and v2.items[@intCast(usize, k2_offset)] != -1) {
                     // Mirror x2 onto top-left coordinate system.
-                    const x2 = a.len - @intCast(usize, v2.items[@intCast(usize, k2_offset)]);
+                    const x2 = a.len() - @intCast(usize, v2.items[@intCast(usize, k2_offset)]);
                     // Does the reverse path on the same diagonal go all the
                     // way to x1? The forward and reverse paths meet, and we
                     // have found the middle snake!
@@ -231,17 +303,17 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
 
             var y2: usize = @intCast(usize, @intCast(isize, x2) - k2);
 
-            if (x2 < a.len and y2 < b.len) {
-                const suffix = ends.findCommonSuffixBytes(a[0..(a.len - x2)], b[0..(b.len - y2)]);
+            if (x2 < a.len() and y2 < b.len()) {
+                const suffix = ends.findCommonSuffixBytes(a.subslice()[0..(a.len() - x2)], b.subslice()[0..(b.len() - y2)]);
                 x2 += suffix;
                 y2 += suffix;
             }
 
             v2.items[k2_offset] = @intCast(isize, x2);
 
-            if (x2 > a.len) {
+            if (x2 > a.len()) {
                 k2end += 2;
-            } else if (y2 > b.len) {
+            } else if (y2 > b.len()) {
                 // Ran off the top of the graph.
                 k2start += 2;
             } else if (!front) {
@@ -250,7 +322,7 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
                     const x1 = @intCast(usize, v1.items[@intCast(usize, k1_offset)]);
                     const y1 = v_offset + x1 - @intCast(usize, k1_offset);
                     // Mirror x2 onto top-left coordinate system.
-                    x2 = a.len - x2;
+                    x2 = a.len() - x2;
                     // std.debug.print("in back loop: {{ a.len: {d}\nx1: {d}\n}}\n", .{ a.len, x1 });
                     if (x1 >= x2) {
                         return bisect_split(a, b, x1, y1, list);
@@ -264,28 +336,26 @@ fn bisect(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
 
     // If we haven't returned earlier, the number of edits equals number of
     // characters, no commonality at all.
-    try list.appendSlice(&.{ Edit.newDelete(0, @intCast(u32, a.len)), Edit.newInsert(0, @intCast(u32, b.len)) });
+    try list.appendSlice(&.{ Edit.newDelete(a), Edit.newInsert(b) });
 }
 
-fn bisect_split(a: []const u8, b: []const u8, x1: usize, y1: usize, list: *std.ArrayList(Edit)) !void {
+fn bisect_split(a: Range, b: Range, x1: usize, y1: usize, list: *std.ArrayList(Edit)) anyerror!void {
     var x1utf8 = x1;
     var y1utf8 = y1;
-    ends.alignUtf8Backward(a, &x1utf8);
-    ends.alignUtf8Backward(b, &y1utf8);
+    std.debug.print("{s} <- {d}", .{ a.subslice(), x1utf8 });
+    ends.alignUtf8Backward(a.subslice(), &x1utf8);
+    ends.alignUtf8Backward(b.subslice(), &y1utf8);
 
-    const a1 = a[0..x1utf8];
-    const b1 = b[0..y1utf8];
+    const as = a.splitAt(x1utf8);
+    const bs = b.splitAt(y1utf8);
 
-    const a2 = a[x1utf8..];
-    const b2 = b[y1utf8..];
+    std.debug.assert(unicode.utf8ValidateSlice(as[0].subslice()));
+    std.debug.assert(unicode.utf8ValidateSlice(as[1].subslice()));
+    std.debug.assert(unicode.utf8ValidateSlice(bs[0].subslice()));
+    std.debug.assert(unicode.utf8ValidateSlice(bs[1].subslice()));
 
-    std.debug.assert(unicode.utf8ValidateSlice(a1));
-    std.debug.assert(unicode.utf8ValidateSlice(a2));
-    std.debug.assert(unicode.utf8ValidateSlice(b1));
-    std.debug.assert(unicode.utf8ValidateSlice(b2));
-
-    try diff(a1, b1, list);
-    try diff(a2, b2, list);
+    try main(as[0], as[1], list);
+    try main(bs[0], bs[1], list);
 }
 
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
@@ -298,15 +368,15 @@ test "diff emojis" {
     // Unicode snowman and unicode comet have the same first two bytes. A
     // byte-based diff would produce a 2-byte Equal followed by 1-byte Delete
     // and Insert.
-    var snowman = "\u{2603}".*;
-    var comet = "\u{2604}".*;
+    var snowman = "\u{2603}";
+    var comet = "\u{2604}";
     try testing.expectEqualSlices(u8, snowman[0..2], comet[0..2]);
 
     var diffBuf = std.ArrayList(Edit).init(ally);
     defer diffBuf.deinit();
     try diff(snowman[0..], comet[0..], &diffBuf);
 
-    const expected: []const Edit = &.{ Edit{ .type = .Delete, .range = .{ 0, 3 } }, Edit{ .type = .Insert, .range = .{ 0, 3 } } };
+    const expected: []const Edit = &.{ Edit.newDelete(Range.new(snowman[0..])), Edit.newInsert(Range.new(comet[0..])) };
 
     try testing.expectEqualSlices(Edit, expected, diffBuf.items);
 }
@@ -336,7 +406,7 @@ test "basic diff tests" {
     try expectDiffRoundtrip("$=[w$-a$+u$=t]");
 }
 
-fn expectDiffRoundtrip(comptime spec: []const u8) anyerror!void {
+fn expectDiffRoundtrip(comptime spec: []const u8) !void {
     const ds = comptime compileDiffSpec(spec);
     const ally = testing.allocator;
     var diffed = std.ArrayList(Edit).init(ally);
