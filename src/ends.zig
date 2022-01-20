@@ -132,4 +132,6 @@ pub fn alignUtf8(s: *Range) void {
         };
         break;
     }
+
+    std.debug.assert(unicode.utf8ValidateSlice(s.subslice()));
 }

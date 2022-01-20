@@ -40,47 +40,67 @@ const Edit = struct {
     }
 
     pub fn newEqual(range: Range) Self {
+        debug.print("Equal range: {s}\n", .{range.subslice()});
+        // if (std.mem.eql(u8, range.subslice(), "6xxx")) {
+        //     debug.panic("meow", .{});
+        // }
         return Edit{ .type = .Equal, .range = .{ @intCast(u32, range.start), @intCast(u32, range.end) } };
     }
 };
 
 fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
-    const commonPrefix = ends.findCommonPrefix(a, b);
-    const commonSuffix = ends.findCommonSuffix(a, b);
-
-    if (commonPrefix.len() > 0) {
-        try list.append(Edit.newEqual(commonPrefix));
+    // Handle empty input on either side.
+    if (a.len() == 0 and b.len() == 0) {
+        return;
+    } else if (a.len() == 0) {
+        try list.append(Edit.newInsert(b));
+        return;
+    } else if (b.len() == 0) {
+        try list.append(Edit.newDelete(a));
+        return;
     }
 
-    if (a.len() == commonPrefix.len()) {
-        if (b.len() != commonPrefix.len()) {
-            try list.append(Edit.newInsert(b.clampLeft(commonPrefix.len())));
+    const prefix = ends.findCommonPrefixBytes(a, b);
+    const suffix = ends.findCommonSuffixBytes(a, b);
+    debug.print("Prefix: {s} — Suffix: {s}\n", .{ prefix.subslice(), suffix.subslice() });
+
+    if (prefix.len() > 0) {
+        try list.append(Edit.newEqual(prefix));
+    }
+
+    if (a.len() == prefix.len()) {
+        if (b.len() != prefix.len()) {
+            try list.append(Edit.newInsert(b.clampLeft(prefix.len())));
         }
         return;
-    } else if (b.len() == commonPrefix.len()) {
-        try list.append(Edit.newDelete(a.clampLeft(commonPrefix.len())));
+    } else if (b.len() == prefix.len()) {
+        try list.append(Edit.newDelete(a.clampLeft(prefix.len())));
         return;
     }
 
-    if (a.len() == commonSuffix.len()) {
-        if (b.len() != commonSuffix.len()) {
-            try list.append(Edit.newInsert(b.clampRight(commonSuffix.len())));
+    if (a.len() == suffix.len()) {
+        if (b.len() != suffix.len()) {
+            try list.append(Edit.newInsert(b.clampRight(suffix.len())));
         }
+        try list.append(Edit.newEqual(a));
         return;
-    } else if (b.len() == commonSuffix.len()) {
-        try list.append(Edit.newDelete(a.clampRight(commonSuffix.len())));
+    } else if (b.len() == suffix.len()) {
+        try list.append(Edit.newDelete(a.clampRight(suffix.len())));
+        try list.append(Edit.newEqual(suffix));
         return;
     }
 
-    // std.debug.print("commonPrefix: {d}, commonSuffix: {d}, original: {s}, clamped: {s}\n\n", .{ commonPrefix, commonSuffix, a.subslice(), a.clamp(commonPrefix, commonSuffix).subslice() });
+    const aClamped = a.clamp(prefix.len(), suffix.len());
+    const bClamped = b.clamp(prefix.len(), suffix.len());
 
-    const aClamped = a.clamp(commonPrefix.len(), commonSuffix.len());
-    const bClamped = b.clamp(commonPrefix.len(), commonSuffix.len());
+    if (aClamped.len() == 1 or bClamped.len() == 1) {
+        try list.appendSlice(&.{ Edit.newDelete(aClamped), Edit.newInsert(bClamped) });
+    } else {
+        try bisect(aClamped, bClamped, list);
+    }
 
-    try bisect(aClamped, bClamped, list);
-
-    if (commonSuffix.len() > 0) {
-        try list.append(Edit.newEqual(commonSuffix));
+    if (suffix.len() > 0) {
+        try list.append(Edit.newEqual(suffix));
     }
 }
 
@@ -94,8 +114,6 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
 fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
     // TODO: remove.
     const ally = std.heap.page_allocator;
-
-    std.debug.print("a.len() = {d}, b.len() = {d}\n", .{ a.len(), b.len() });
 
     // Since D = 2(N - L), if the strings have nothing in common (L=0), D = N =
     // len(A) + len(B). We divide by two because we are using a divide and
@@ -120,8 +138,6 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
     // The indices of V should be thought of as ranging [-max_d, max_d].
     const v_len = 2 * max_d;
 
-    debug.print("v_len = {d}, v_offset = {d}\n", .{ v_len, v_offset });
-
     // The V array for **forward** paths.
     var v1 = try std.ArrayList(isize).initCapacity(ally, v_len);
     // The V array for **reverse** paths.
@@ -131,12 +147,14 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
 
     {
         var i: usize = 0;
-        while (i <= v_len) {
+        while (i < v_len) : (i += 1) {
             v1.appendAssumeCapacity(-1);
             v2.appendAssumeCapacity(-1);
-            i += 1;
         }
+        debug.assert(v1.items.len == v_len);
     }
+
+    debug.print("\na.len: {d}, b.len: {d}, v_len: {d}, v_offset: {d}\n", .{ a.len(), a.len(), v_len, v_offset });
 
     // We start at (0, 0) and (N, M). At these points (equivalently, for these
     // diagonals), we know there are 0-paths, so we can already fill that in.
@@ -150,11 +168,11 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
 
     // If the total number of characters is odd, then the forward path will
     // collide with the reverse path.
-    const front = @mod(delta, @as(isize, 2)) != 0;
+    const front = @mod(delta, 2) != 0;
 
-    // Offsets for start and end of k loop.
-    // Prevents mapping of space beyond the grid. k variables are diagonals. k1
-    // is the forward path, k2 is the reverse path.
+    // Offsets for start and end of k loop. Prevents mapping of space beyond
+    // the grid. k variables are diagonals. k1 is the forward path, k2 is the
+    // reverse path.
     var k1start: isize = 0;
     var k1end: isize = 0;
     var k2start: isize = 0;
@@ -197,13 +215,12 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
             // have k = 1 or k = -1, respectively, and there y is one-removed
             // from x. As we move away from the (0, 0) diagonal, the distance
             // grows.
-            var y1: usize = @intCast(usize, @intCast(isize, x1) - k1);
+            var y1 = @intCast(usize, @intCast(isize, x1) - k1);
 
             // We have the end of the D-path: (x1, y1). Now let's extend it
             // with its snake.
             if (x1 < a.len() and y1 < b.len()) {
                 const prefix = ends.findCommonPrefixBytes(a.clampLeft(x1), b.clampLeft(y1));
-                // std.debug.print("a.len: {d}\nx1: {d}\nprefix: {d}\n", .{ a.len, x1, prefix });
                 x1 += prefix.len();
                 y1 += prefix.len();
             }
@@ -269,7 +286,6 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
                     const y1 = v_offset + x1 - @intCast(usize, k1_offset);
                     // Mirror x2 onto top-left coordinate system.
                     x2 = a.len() - x2;
-                    // std.debug.print("in back loop: {{ a.len: {d}\nx1: {d}\n}}\n", .{ a.len, x1 });
                     if (x1 >= x2) {
                         return bisect_split(a, b, x1, y1, list);
                     }
@@ -282,28 +298,14 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
 
     // If we haven't returned earlier, the number of edits equals number of
     // characters, no commonality at all.
+    debug.print("hit! {s}\n", .{a.subslice()});
     try list.appendSlice(&.{ Edit.newDelete(a), Edit.newInsert(b) });
 }
 
 fn bisect_split(a: Range, b: Range, x1: usize, y1: usize, list: *std.ArrayList(Edit)) anyerror!void {
-    // var x1utf8 = x1;
-    // var y1utf8 = y1;
-    // std.debug.print("{s} <- {d}", .{ a.subslice(), x1utf8 });
-    // ends.alignUtf8Backward(a.subslice(), &x1utf8);
-    // ends.alignUtf8Backward(b.subslice(), &y1utf8);
-
     var as = a.splitAt(x1);
     var bs = b.splitAt(y1);
 
-    ends.alignUtf8(&as[0]);
-    ends.alignUtf8(&bs[0]);
-    ends.alignUtf8(&as[1]);
-    ends.alignUtf8(&bs[1]);
-
-    // std.debug.assert(unicode.utf8ValidateSlice(as[0].subslice()));
-    // std.debug.assert(unicode.utf8ValidateSlice(as[1].subslice()));
-    // std.debug.assert(unicode.utf8ValidateSlice(bs[0].subslice()));
-    // std.debug.assert(unicode.utf8ValidateSlice(bs[1].subslice()));
     try main(as[0], bs[0], list);
     try main(as[1], bs[1], list);
 }
@@ -312,29 +314,29 @@ fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
     return std.unicode.Utf8Iterator{ .bytes = it.bytes, .i = it.i };
 }
 
-// ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
-test "diff emojis" {
-    const ally = testing.allocator;
-    // Unicode snowman and unicode comet have the same first two bytes. A
-    // byte-based diff would produce a 2-byte Equal followed by 1-byte Delete
-    // and Insert.
-    var snowman = "\u{2603}";
-    var comet = "\u{2604}";
-    try testing.expectEqualSlices(u8, snowman[0..2], comet[0..2]);
+// // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
+// test "diff emojis" {
+//     const ally = testing.allocator;
+//     // Unicode snowman and unicode comet have the same first two bytes. A
+//     // byte-based diff would produce a 2-byte Equal followed by 1-byte Delete
+//     // and Insert.
+//     var snowman = "\u{2603}";
+//     var comet = "\u{2604}";
+//     try testing.expectEqualSlices(u8, snowman[0..2], comet[0..2]);
 
-    var diffBuf = std.ArrayList(Edit).init(ally);
-    defer diffBuf.deinit();
-    try diff(snowman[0..], comet[0..], &diffBuf);
+//     var diffBuf = std.ArrayList(Edit).init(ally);
+//     defer diffBuf.deinit();
+//     try diff(snowman[0..], comet[0..], &diffBuf);
 
-    const expected: []const Edit = &.{ Edit.newDelete(Range.new(snowman[0..])), Edit.newInsert(Range.new(comet[0..])) };
+//     const expected: []const Edit = &.{ Edit.newDelete(Range.new(snowman[0..])), Edit.newInsert(Range.new(comet[0..])) };
 
-    try testing.expectEqualSlices(Edit, expected, diffBuf.items);
-}
+//     try testing.expectEqualSlices(Edit, expected, diffBuf.items);
+// }
 
-// ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
-test "diff emojis with longer string" {
-    try expectDiffRoundtrip("$=[$-乀丁$+一$=abcd$-一$+丁$=]");
-}
+// // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
+// test "diff emojis with longer string" {
+//     try expectDiffRoundtrip("$=[$-乀丁$+一$=abcd$-一$+丁$=]");
+// }
 
 test "compileDiffSpec works" {
     const ds1 = compileDiffSpec("$=abcd");
@@ -350,10 +352,35 @@ test "compileDiffSpec works" {
     try testing.expectEqualSlices(Edit, ds3_exp, ds3.diff);
 }
 
+test "diff with common prefix" {
+    // no common prefix
+    try expectDiffRoundtrip("$-abc$+xyz");
+
+    // common prefix with different suffixes
+    try expectDiffRoundtrip("$=1234$-abcdef$+xyz");
+
+    // common prefix with suffix only on the a side
+    try expectDiffRoundtrip("$=1234$+xyz");
+}
+
+test "diff with common suffix" {
+    // no common suffix
+    try expectDiffRoundtrip("$-abc$+xyz");
+
+    // common suffix with different prefixes
+    try expectDiffRoundtrip("$-abcdef$+xyz$=1234");
+
+    // common suffix with prefix only on the b side
+    try expectDiffRoundtrip("$+xyz$=1234");
+}
+
 test "basic diff tests" {
     // try expectDiffRoundtrip("$-meow$+woofwoof");
     try expectDiffRoundtrip("$=nononono");
     try expectDiffRoundtrip("$=[w$-a$+u$=t]");
+    try expectDiffRoundtrip("$-123456$+abcd");
+    try expectDiffRoundtrip("$-123456$=xxx$+abcd");
+    try expectDiffRoundtrip("$-f$+\u{fb01}$=i");
 }
 
 fn expectDiffRoundtrip(comptime spec: []const u8) !void {
@@ -363,7 +390,6 @@ fn expectDiffRoundtrip(comptime spec: []const u8) !void {
     defer diffed.deinit();
     try diff(ds.a, ds.b, &diffed);
     try testing.expectEqualSlices(Edit, ds.diff, diffed.items) catch |err| blk: {
-        std.debug.print("=== expected ===\n{s}\n\n=== actual ===\n{s}\n", .{ ds.diff, diffed.items });
         var dsDiff = std.ArrayList(u8).init(ally);
         defer dsDiff.deinit();
         try debugFmtDiff(ds.a, ds.b, ds.diff, dsDiff.writer());
@@ -371,6 +397,9 @@ fn expectDiffRoundtrip(comptime spec: []const u8) !void {
         try debugFmtDiff(ds.a, ds.b, diffed.items, diffedDiff.writer());
         defer diffedDiff.deinit();
         std.log.err(
+            \\ Expected: {s} 
+            \\ != 
+            \\ Actual: {s}
             \\
             \\Input a:
             \\
@@ -387,7 +416,7 @@ fn expectDiffRoundtrip(comptime spec: []const u8) !void {
             \\Found diff:
             \\
             \\{s}
-        , .{ ds.a, ds.b, dsDiff.items, diffedDiff.items });
+        , .{ ds.diff, diffed.items, ds.a, ds.b, dsDiff.items, diffedDiff.items });
         break :blk err;
     };
 }
