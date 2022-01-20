@@ -15,25 +15,25 @@ pub const Range = struct {
     }
 
     pub fn splitAt(self: Self, n: usize) [2]Self {
-        return .{ self.firstN(n), self.clampLeft(n) };
+        return .{ self.firstN(n), self.shrinkLeft(n) };
     }
 
     /// Shorten the subslice by `left` on the left.
-    pub fn clampLeft(self: Self, left: usize) Self {
+    pub fn shrinkLeft(self: Self, left: usize) Self {
         std.debug.assert(left <= self.len());
         return Range{ .txt = self.txt, .start = self.start + left, .end = self.end };
     }
 
     /// Shorten the subslice by `right` on the right.
-    pub fn clampRight(self: Self, right: usize) Self {
+    pub fn shrinkRight(self: Self, right: usize) Self {
         std.debug.assert(right <= self.len());
         return Range{ .txt = self.txt, .start = self.start, .end = self.end - right };
     }
 
     /// Shorten the range from both sides simultaneously.
-    pub fn clamp(self: Self, left: usize, right: usize) Self {
+    pub fn shrink(self: Self, left: usize, right: usize) Self {
         std.debug.assert(left + right <= self.len());
-        return self.clampLeft(left).clampRight(right);
+        return self.shrinkLeft(left).shrinkRight(right);
     }
 
     pub fn extendLeft(self: Self, n: usize) Self {

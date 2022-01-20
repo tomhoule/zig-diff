@@ -70,33 +70,33 @@ fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
 
     if (a.len() == prefix.len()) {
         if (b.len() != prefix.len()) {
-            try list.append(Edit.newInsert(b.clampLeft(prefix.len())));
+            try list.append(Edit.newInsert(b.shrinkLeft(prefix.len())));
         }
         return;
     } else if (b.len() == prefix.len()) {
-        try list.append(Edit.newDelete(a.clampLeft(prefix.len())));
+        try list.append(Edit.newDelete(a.shrinkLeft(prefix.len())));
         return;
     }
 
     if (a.len() == suffix.len()) {
         if (b.len() != suffix.len()) {
-            try list.append(Edit.newInsert(b.clampRight(suffix.len())));
+            try list.append(Edit.newInsert(b.shrinkRight(suffix.len())));
         }
         try list.append(Edit.newEqual(a));
         return;
     } else if (b.len() == suffix.len()) {
-        try list.append(Edit.newDelete(a.clampRight(suffix.len())));
+        try list.append(Edit.newDelete(a.shrinkRight(suffix.len())));
         try list.append(Edit.newEqual(suffix));
         return;
     }
 
-    const aClamped = a.clamp(prefix.len(), suffix.len());
-    const bClamped = b.clamp(prefix.len(), suffix.len());
+    const ashrinked = a.shrink(prefix.len(), suffix.len());
+    const bshrinked = b.shrink(prefix.len(), suffix.len());
 
-    if (aClamped.len() == 1 or bClamped.len() == 1) {
-        try list.appendSlice(&.{ Edit.newDelete(aClamped), Edit.newInsert(bClamped) });
+    if (ashrinked.len() == 1 or bshrinked.len() == 1) {
+        try list.appendSlice(&.{ Edit.newDelete(ashrinked), Edit.newInsert(bshrinked) });
     } else {
-        try bisect(aClamped, bClamped, list);
+        try bisect(ashrinked, bshrinked, list);
     }
 
     if (suffix.len() > 0) {
@@ -220,7 +220,7 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
             // We have the end of the D-path: (x1, y1). Now let's extend it
             // with its snake.
             if (x1 < a.len() and y1 < b.len()) {
-                const prefix = ends.findCommonPrefixBytes(a.clampLeft(x1), b.clampLeft(y1));
+                const prefix = ends.findCommonPrefixBytes(a.shrinkLeft(x1), b.shrinkLeft(y1));
                 x1 += prefix.len();
                 y1 += prefix.len();
             }
@@ -267,7 +267,7 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
             var y2: usize = @intCast(usize, @intCast(isize, x2) - k2);
 
             if (x2 < a.len() and y2 < b.len()) {
-                const suffix = ends.findCommonSuffixBytes(a.clampRight(x2), b.clampRight(y2));
+                const suffix = ends.findCommonSuffixBytes(a.shrinkRight(x2), b.shrinkRight(y2));
                 x2 += suffix.len();
                 y2 += suffix.len();
             }

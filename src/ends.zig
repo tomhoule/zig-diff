@@ -110,7 +110,7 @@ pub fn alignUtf8(s: *Range) void {
         }
 
         _ = unicode.utf8ByteSequenceLength(s.subslice()[0]) catch {
-            s.* = s.clampLeft(1);
+            s.* = s.shrinkLeft(1);
             continue;
         };
         break;
@@ -127,7 +127,7 @@ pub fn alignUtf8(s: *Range) void {
         }
 
         _ = unicode.utf8ByteSequenceLength(s.txt[s.end]) catch {
-            s.* = s.clampRight(1);
+            s.* = s.shrinkRight(1);
             continue;
         };
         break;
