@@ -112,6 +112,8 @@ fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
     }
 }
 
+/// UTF-8 aware diff. It does not validate, but assumes its input is valid
+/// UTF-8.
 pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     const aRange = Range.new(a);
     const bRange = Range.new(b);
@@ -120,10 +122,18 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     try cleanupMerge(a, list);
 }
 
+/// Byte-level diff, for ascii text or binary data.
+pub fn byteDiff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
+    const aRange = Range.new(a);
+    const bRange = Range.new(b);
+    try main(aRange, bRange, list);
+    try cleanupMerge(a, list);
+}
+
 // Find the middle snake.
 fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
-    // TODO: remove.
-    const ally = std.heap.page_allocator;
+    // TODO: give more control to the caller.
+    const ally = list.allocator;
 
     // Since D = 2(N - L), if the strings have nothing in common (L=0), D = N =
     // len(A) + len(B). We divide by two because we are using a divide and
