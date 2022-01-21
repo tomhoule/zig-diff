@@ -46,6 +46,11 @@ const Edit = struct {
         // }
         return Edit{ .type = .Equal, .range = .{ @intCast(u32, range.start), @intCast(u32, range.end) } };
     }
+
+    /// The length of the edit in bytes.
+    pub fn len(self: Self) u32 {
+        return self.range[1] - self.range[0];
+    }
 };
 
 fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
@@ -108,6 +113,7 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     const aRange = Range.new(a);
     const bRange = Range.new(b);
     try main(aRange, bRange, list);
+    cleanupCharBoundary(a, b, list);
 }
 
 // Find the middle snake.
@@ -310,33 +316,134 @@ fn bisect_split(a: Range, b: Range, x1: usize, y1: usize, list: *std.ArrayList(E
     try main(as[1], bs[1], list);
 }
 
+fn boundaryUp(s: []const u8, end: usize) usize {
+    var adjust: usize = 0;
+    while (end + adjust < s.len and !isCharBoundary(s[end + adjust])) {
+        adjust += 1;
+    }
+    return adjust;
+}
+
+fn boundaryDown(s: []const u8, end: usize) usize {
+    // The end of the slice counts as a character boundary.
+    if (end == s.len) {
+        return 0;
+    }
+
+    var adjust: usize = 0;
+    while (end - adjust > 0 and !isCharBoundary(s[end - adjust])) {
+        adjust += 1;
+    }
+    return adjust;
+}
+
+fn skipOverlap(a: [2]u32, b: *[2]u32) void {
+    // TODO: double check the logic here
+    if (a[1] > b[0]) {
+        const delta = std.math.min(a[1] - b[0], b[1] - b[0]);
+        b[0] += delta;
+    }
+}
+
+// Is the given byte a valid first byte in a UTF-8 sequence?
+fn isCharBoundary(c: u8) bool {
+    _ = unicode.utf8ByteSequenceLength(c) catch {
+        return false;
+    };
+    return true;
+}
+
+fn cleanupCharBoundary(a: []const u8, b: []const u8, edits_container: *std.ArrayList(Edit)) void {
+    var edits = edits_container.items;
+    var retain: usize = 0;
+    var lastDelete: [2]u32 = .{ 0, 0 };
+    var lastInsert: [2]u32 = .{ 0, 0 };
+
+    var i: usize = 0;
+    while (i < edits.len) : (i += 1) {
+        var edit = &edits[i];
+
+        // See after the switch: `continue` means we discard the edit.
+
+        switch (edit.type) {
+            .Equal => {
+                const adjust = boundaryUp(a, edit.range[0]);
+                debug.print("adjust: {d}\n", .{adjust});
+                // If the whole range is sub-character, skip it.
+                if (edit.len() <= adjust) {
+                    continue;
+                }
+                edit.range[0] += @intCast(u32, adjust);
+                edit.range[1] -= @intCast(u32, boundaryDown(a, edit.range[1]));
+            },
+            .Delete => {
+                skipOverlap(lastDelete, &edit.range);
+                if (edit.len() == 0) {
+                    continue;
+                }
+
+                edit.range[0] -= @intCast(u32, boundaryDown(a, edit.range[0]));
+                edit.range[1] += @intCast(u32, boundaryUp(a, edit.range[1]));
+                lastDelete = edit.range;
+            },
+            .Insert => {
+                skipOverlap(lastInsert, &edit.range);
+                if (edit.len() == 0) {
+                    continue;
+                }
+
+                edit.range[0] -= @intCast(u32, boundaryDown(b, edit.range[0]));
+                edit.range[1] += @intCast(u32, boundaryUp(b, edit.range[1]));
+                lastInsert = edit.range;
+            },
+        }
+
+        if (edit.len() == 0) {
+            continue;
+        }
+
+        edits[retain] = edits[i];
+        retain += 1;
+    }
+
+    edits_container.shrinkRetainingCapacity(retain);
+}
+
+fn cleanupMerge(a: []const u8, b: []const u8, edits: []Edit) void {
+    _ = a;
+    _ = b;
+    _ = edits;
+    unreachable;
+}
+
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
     return std.unicode.Utf8Iterator{ .bytes = it.bytes, .i = it.i };
 }
 
-// // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
-// test "diff emojis" {
-//     const ally = testing.allocator;
-//     // Unicode snowman and unicode comet have the same first two bytes. A
-//     // byte-based diff would produce a 2-byte Equal followed by 1-byte Delete
-//     // and Insert.
-//     var snowman = "\u{2603}";
-//     var comet = "\u{2604}";
-//     try testing.expectEqualSlices(u8, snowman[0..2], comet[0..2]);
+// ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
+test "diff single emoji" {
+    const ally = testing.allocator;
+    // Unicode snowman and unicode comet have the same first two bytes. A
+    // byte-based diff would produce a 2-byte Equal followed by 1-byte Delete
+    // and Insert.
+    var snowman = "\u{2603}";
+    var comet = "\u{2604}";
+    try testing.expectEqualSlices(u8, snowman[0..2], comet[0..2]);
 
-//     var diffBuf = std.ArrayList(Edit).init(ally);
-//     defer diffBuf.deinit();
-//     try diff(snowman[0..], comet[0..], &diffBuf);
+    var diffBuf = std.ArrayList(Edit).init(ally);
+    defer diffBuf.deinit();
+    try diff(snowman[0..], comet[0..], &diffBuf);
 
-//     const expected: []const Edit = &.{ Edit.newDelete(Range.new(snowman[0..])), Edit.newInsert(Range.new(comet[0..])) };
+    const expected: []const Edit = &.{ Edit.newDelete(Range.new(snowman[0..])), Edit.newInsert(Range.new(comet[0..])) };
 
-//     try testing.expectEqualSlices(Edit, expected, diffBuf.items);
-// }
+    debug.print("{s}\n", .{diffBuf.items});
+    try testing.expectEqualSlices(Edit, expected, diffBuf.items);
+}
 
-// // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
-// test "diff emojis with longer string" {
-//     try expectDiffRoundtrip("$=[$-乀丁$+一$=abcd$-一$+丁$=]");
-// }
+// ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
+test "diff emojis with longer string" {
+    try expectDiffRoundtrip("$=[$-乀丁$+一$=abcd$-一$+丁$=]");
+}
 
 test "compileDiffSpec works" {
     const ds1 = compileDiffSpec("$=abcd");
