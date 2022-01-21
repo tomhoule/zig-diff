@@ -24,7 +24,7 @@ const Range = @import("range.zig").Range;
 
 const EditType = enum { Delete, Insert, Equal };
 
-const Edit = struct {
+pub const Edit = struct {
     type: EditType,
     /// .{start, end} offsets.
     range: [2]u32,
@@ -56,6 +56,37 @@ const Edit = struct {
         return self.range[0];
     }
 };
+
+/// UTF-8 aware diff. It does not validate, but assumes its input is valid
+/// UTF-8.
+pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
+    const aRange = Range.new(a);
+    const bRange = Range.new(b);
+    try main(aRange, bRange, list);
+    cleanupCharBoundary(a, b, list);
+    try cleanupMerge(a, list);
+}
+
+/// Byte-level diff, for ascii text or binary data.
+pub fn byteDiff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
+    const aRange = Range.new(a);
+    const bRange = Range.new(b);
+    try main(aRange, bRange, list);
+    try cleanupMerge(a, list);
+}
+
+/// Display a diff with terminal colors.
+///
+/// The `out` param should be a stdlib writer.
+pub fn fmtDiff(a: []const u8, b: []const u8, edits: []const Edit, out: anytype) !void {
+    for (edits) |edit| {
+        switch (edit.type) {
+            .Equal => try out.writeAll(a[edit.range[0]..edit.range[1]]),
+            .Delete => try out.print("\x1b[41m{s}\x1b[0m", .{a[edit.range[0]..edit.range[1]]}),
+            .Insert => try out.print("\x1b[42m{s}\x1b[0m", .{b[edit.range[0]..edit.range[1]]}),
+        }
+    }
+}
 
 fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
     // Handle empty input on either side.
@@ -110,24 +141,6 @@ fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
     if (suffix.len() > 0) {
         try list.append(Edit.newEqual(suffix));
     }
-}
-
-/// UTF-8 aware diff. It does not validate, but assumes its input is valid
-/// UTF-8.
-pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
-    const aRange = Range.new(a);
-    const bRange = Range.new(b);
-    try main(aRange, bRange, list);
-    cleanupCharBoundary(a, b, list);
-    try cleanupMerge(a, list);
-}
-
-/// Byte-level diff, for ascii text or binary data.
-pub fn byteDiff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
-    const aRange = Range.new(a);
-    const bRange = Range.new(b);
-    try main(aRange, bRange, list);
-    try cleanupMerge(a, list);
 }
 
 // Find the middle snake.
@@ -670,9 +683,9 @@ fn expectDiffRoundtrip(comptime spec: []const u8) !void {
     try testing.expectEqualSlices(Edit, ds.diff, diffed.items) catch |err| blk: {
         var dsDiff = std.ArrayList(u8).init(ally);
         defer dsDiff.deinit();
-        try debugFmtDiff(ds.a, ds.b, ds.diff, dsDiff.writer());
+        try fmtDiff(ds.a, ds.b, ds.diff, dsDiff.writer());
         var diffedDiff = std.ArrayList(u8).init(ally);
-        try debugFmtDiff(ds.a, ds.b, diffed.items, diffedDiff.writer());
+        try fmtDiff(ds.a, ds.b, diffed.items, diffedDiff.writer());
         defer diffedDiff.deinit();
         std.log.err(
             \\ Expected: {s} 
@@ -697,16 +710,6 @@ fn expectDiffRoundtrip(comptime spec: []const u8) !void {
         , .{ ds.diff, diffed.items, ds.a, ds.b, dsDiff.items, diffedDiff.items });
         break :blk err;
     };
-}
-
-fn debugFmtDiff(a: []const u8, b: []const u8, edits: []const Edit, out: anytype) !void {
-    for (edits) |edit| {
-        switch (edit.type) {
-            .Equal => try out.writeAll(a[edit.range[0]..edit.range[1]]),
-            .Delete => try out.print("\x1b[41m{s}\x1b[0m", .{a[edit.range[0]..edit.range[1]]}),
-            .Insert => try out.print("\x1b[42m{s}\x1b[0m", .{b[edit.range[0]..edit.range[1]]}),
-        }
-    }
 }
 
 const DiffSpec = struct {
