@@ -4,7 +4,7 @@ Zig text diffing library inspired and partially based on
 [diff-match-patch](https://github.com/google/diff-match-patch) and David
 Tolnay's [dissimilar](https://github.com/dtolnay/dissimilar) Rust crate.
 
-The basic approach is [Myer's diff
+The basic approach is [Myers' diff
 algorithm](https://neil.fraser.name/writing/diff/myers.pdf). Both bytewise
 diffing and utf-8 aware diffing are supported.
 
