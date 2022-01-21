@@ -40,10 +40,6 @@ const Edit = struct {
     }
 
     pub fn newEqual(range: Range) Self {
-        debug.print("Equal range: {s}\n", .{range.subslice()});
-        // if (std.mem.eql(u8, range.subslice(), "6xxx")) {
-        //     debug.panic("meow", .{});
-        // }
         return Edit{ .type = .Equal, .range = .{ @intCast(u32, range.start), @intCast(u32, range.end) } };
     }
 
@@ -51,23 +47,30 @@ const Edit = struct {
     pub fn len(self: Self) u32 {
         return self.range[1] - self.range[0];
     }
+
+    pub fn end(self: Self) u32 {
+        return self.range[1];
+    }
+
+    pub fn start(self: Self) u32 {
+        return self.range[0];
+    }
 };
 
 fn main(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
     // Handle empty input on either side.
     if (a.len() == 0 and b.len() == 0) {
         return;
-    } else if (a.len() == 0) {
-        try list.append(Edit.newInsert(b));
-        return;
     } else if (b.len() == 0) {
         try list.append(Edit.newDelete(a));
+        return;
+    } else if (a.len() == 0) {
+        try list.append(Edit.newInsert(b));
         return;
     }
 
     const prefix = ends.findCommonPrefixBytes(a, b);
     const suffix = ends.findCommonSuffixBytes(a, b);
-    debug.print("Prefix: {s} — Suffix: {s}\n", .{ prefix.subslice(), suffix.subslice() });
 
     if (prefix.len() > 0) {
         try list.append(Edit.newEqual(prefix));
@@ -114,6 +117,7 @@ pub fn diff(a: []const u8, b: []const u8, list: *std.ArrayList(Edit)) !void {
     const bRange = Range.new(b);
     try main(aRange, bRange, list);
     cleanupCharBoundary(a, b, list);
+    try cleanupMerge(a, list);
 }
 
 // Find the middle snake.
@@ -159,8 +163,6 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
         }
         debug.assert(v1.items.len == v_len);
     }
-
-    debug.print("\na.len: {d}, b.len: {d}, v_len: {d}, v_offset: {d}\n", .{ a.len(), a.len(), v_len, v_offset });
 
     // We start at (0, 0) and (N, M). At these points (equivalently, for these
     // diagonals), we know there are 0-paths, so we can already fill that in.
@@ -304,7 +306,6 @@ fn bisect(a: Range, b: Range, list: *std.ArrayList(Edit)) !void {
 
     // If we haven't returned earlier, the number of edits equals number of
     // characters, no commonality at all.
-    debug.print("hit! {s}\n", .{a.subslice()});
     try list.appendSlice(&.{ Edit.newDelete(a), Edit.newInsert(b) });
 }
 
@@ -356,8 +357,8 @@ fn isCharBoundary(c: u8) bool {
 fn cleanupCharBoundary(a: []const u8, b: []const u8, edits_container: *std.ArrayList(Edit)) void {
     var edits = edits_container.items;
     var retain: usize = 0;
-    var lastDelete: [2]u32 = .{ 0, 0 };
-    var lastInsert: [2]u32 = .{ 0, 0 };
+    var lastDelete = [_]u32{ 0, 0 };
+    var lastInsert = [_]u32{ 0, 0 };
 
     var i: usize = 0;
     while (i < edits.len) : (i += 1) {
@@ -368,13 +369,18 @@ fn cleanupCharBoundary(a: []const u8, b: []const u8, edits_container: *std.Array
         switch (edit.type) {
             .Equal => {
                 const adjust = boundaryUp(a, edit.range[0]);
-                debug.print("adjust: {d}\n", .{adjust});
+
                 // If the whole range is sub-character, skip it.
                 if (edit.len() <= adjust) {
                     continue;
                 }
+
                 edit.range[0] += @intCast(u32, adjust);
                 edit.range[1] -= @intCast(u32, boundaryDown(a, edit.range[1]));
+
+                if (edit.len() == 0) { // not in dissimilar
+                    continue;
+                }
             },
             .Delete => {
                 skipOverlap(lastDelete, &edit.range);
@@ -398,10 +404,6 @@ fn cleanupCharBoundary(a: []const u8, b: []const u8, edits_container: *std.Array
             },
         }
 
-        if (edit.len() == 0) {
-            continue;
-        }
-
         edits[retain] = edits[i];
         retain += 1;
     }
@@ -409,11 +411,101 @@ fn cleanupCharBoundary(a: []const u8, b: []const u8, edits_container: *std.Array
     edits_container.shrinkRetainingCapacity(retain);
 }
 
-fn cleanupMerge(a: []const u8, b: []const u8, edits: []Edit) void {
-    _ = a;
-    _ = b;
-    _ = edits;
-    unreachable;
+// Reorder and merge like edit sections. Merge equalities. Any edit section can
+// move as long as it doesn't cross an equality.
+fn cleanupMerge(a: []const u8, edits: *std.ArrayList(Edit)) !void {
+    if (edits.items.len == 0) {
+        return;
+    }
+
+    while (true) {
+        // Append a dummy edit.
+        try edits.append(Edit.newEqual(Range.new(a).lastN(0)));
+
+        // In this loop, we use edits with ranges ending at 0 as tombstone
+        // values. They all get removed at the end.
+        var i: usize = 0;
+        var delete_end: u32 = 0;
+        var insert_end: u32 = 0;
+        var first_insert: usize = 0;
+        var first_delete: usize = 0;
+        while (i < edits.items.len) : (i += 1) {
+            var edit = &edits.items[i];
+
+            // Tombstone
+            if (edit.end() == 0) {
+                continue;
+            }
+
+            switch (edit.type) {
+                .Delete => {
+                    const original_delete_end = delete_end;
+                    delete_end = edit.end();
+
+                    if (original_delete_end == 0) {
+                        first_delete = i;
+                    } else {
+                        edit.range[1] = 0; // invalidate, we only keep the first one
+                    }
+                },
+                .Insert => {
+                    const original_insert_end = insert_end;
+                    insert_end = edit.end();
+
+                    if (original_insert_end == 0) {
+                        first_insert = i;
+                    } else {
+                        edit.range[1] = 0; // invalidate, we only keep the first one
+                    }
+                },
+                .Equal => {
+                    if (insert_end > 0 or delete_end > 0) {
+                        if (insert_end > 0) {
+                            edits.items[first_insert].range[1] = insert_end;
+                        }
+                        if (delete_end > 0) {
+                            edits.items[first_delete].range[1] = delete_end;
+                        }
+                    } else if (i > 0) {
+                        // We have an Equal that is not at the start, and not
+                        // preceded by a Delete or an Insert. Merge it with the
+                        // previous Equal.
+                        var j = i - 1;
+                        while (edits.items[j].end() == 0 and j > 0) : (j -= 1) {}
+                        edits.items[j].range[1] = edit.range[1];
+                        edit.range[1] = 0; // forget about this one.
+                    }
+
+                    first_delete = 0;
+                    first_insert = 0;
+                    insert_end = 0;
+                    delete_end = 0;
+                },
+            }
+        }
+
+        // Remove the tombstones
+        {
+            var read: usize = 0;
+            var write: usize = 0;
+            while (read < edits.items.len) : (read += 1) {
+                if (edits.items[read].range[1] == 0) {
+                    continue;
+                }
+
+                edits.items[write] = edits.items[read];
+                write += 1;
+            }
+
+            edits.shrinkRetainingCapacity(write);
+        }
+
+        if (edits.items[edits.items.len - 1].len() == 0) {
+            _ = edits.pop();
+        }
+
+        break;
+    }
 }
 
 fn cloneUtf8Iterator(it: std.unicode.Utf8Iterator) std.unicode.Utf8Iterator {
@@ -436,13 +528,12 @@ test "diff single emoji" {
 
     const expected: []const Edit = &.{ Edit.newDelete(Range.new(snowman[0..])), Edit.newInsert(Range.new(comet[0..])) };
 
-    debug.print("{s}\n", .{diffBuf.items});
     try testing.expectEqualSlices(Edit, expected, diffBuf.items);
 }
 
 // ported from dtolnay/dissimilar: https://github.com/dtolnay/dissimilar/blob/master/tests/test.rs
 test "diff emojis with longer string" {
-    try expectDiffRoundtrip("$=[$-乀丁$+一$=abcd$-一$+丁$=]");
+    try expectDiffRoundtrip("$=[$-乀丁$+一$=abcd$+丁$-一$=]");
 }
 
 test "compileDiffSpec works" {
@@ -482,12 +573,82 @@ test "diff with common suffix" {
 }
 
 test "basic diff tests" {
-    // try expectDiffRoundtrip("$-meow$+woofwoof");
     try expectDiffRoundtrip("$=nononono");
     try expectDiffRoundtrip("$=[w$-a$+u$=t]");
     try expectDiffRoundtrip("$-123456$+abcd");
     try expectDiffRoundtrip("$-123456$=xxx$+abcd");
     try expectDiffRoundtrip("$-f$+\u{fb01}$=i");
+
+    // Ugly but correct
+    // meow <> woofwoof
+    try expectDiffRoundtrip("$-me$+wo$=o$-w$+fwoof");
+}
+
+test "diff null case" {
+    const ally = testing.allocator;
+    var list = std.ArrayList(Edit).init(ally);
+    try diff("", "", &list);
+    try testing.expectEqualSlices(Edit, &[_]Edit{}, list.items);
+}
+
+test "diff equality" {
+    try expectDiffRoundtrip("$=abc");
+    try expectDiffRoundtrip("$=黑糖糕");
+}
+
+test "simple insertion" {
+    try expectDiffRoundtrip("$=ab$+123$=c");
+}
+
+test "simple deletion" {
+    try expectDiffRoundtrip("$=ab$-123$=c");
+}
+
+test "two insertions" {
+    // TODO: probably needs better cleanupMerge / semantic cleanup
+    // try expectDiffRoundtrip("$=a$+123$=b$+456$=c");
+    try expectDiffRoundtrip("$=a$-b$+123b456$=c");
+}
+
+test "two deletions" {
+    // TODO: probably needs better cleanupMerge / semantic cleanup
+    // try expectDiffRoundtrip("$=a$-123$=b$-456$=c");
+    try expectDiffRoundtrip("$=a$-123b456$+b$=c");
+}
+
+test "single character" {
+    try expectDiffRoundtrip("$-a$+b");
+}
+
+test "fruits" {
+    // "Apples are a fruit."
+    // "Bananas are also fruit."
+    try expectDiffRoundtrip("$-Apple$+Banana$=s are a$+lso$= fruit");
+}
+
+test "control characters" {
+    try expectDiffRoundtrip("$-a$+\u{0680}$=x$-\t$+\\000");
+}
+
+test "overlap" {
+    // 1ayb2 <> abxab
+    // TODO: this is not as clean as it should be
+    // try expectDiffRoundtrip("$-1$+a$-y$=b$-2$+xab"); // #1
+    try expectDiffRoundtrip("$+abxab$-1yb2"); // #1
+
+    // abcy <> xaxcxabc
+    try expectDiffRoundtrip("$-a$+xaxcx$=bc$-y"); // #2
+
+    // ABCDa=bcd=efghijklmnopqrsEFGHIJKLMNOefg <> a-bcd-efghijklmnopqrs
+    try expectDiffRoundtrip("$-ABCD$=a$+=$--$=bcd$-=$+-$=efghijklmnopqrs$-EFGHIJKLMNOefg"); // #3
+}
+
+test "large equality" {
+    // "a [[Pennsylvania]] and [[New"
+    // " and [[Pennsylvania]]"
+    // TODO: this is not as clean as it should be.
+    // try expectDiffRoundtrip("$+ $=a$+nd$= [[Pennsylvania]]$+ and [[New");
+    try expectDiffRoundtrip("$-a$+ and$= [[Pennsylvania]]$+ and [[New");
 }
 
 fn expectDiffRoundtrip(comptime spec: []const u8) !void {
